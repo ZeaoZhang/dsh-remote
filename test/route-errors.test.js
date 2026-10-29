@@ -37,6 +37,7 @@ function makeCtx() {
     effect: () => {},
     inject(names, callback) { if (names.every((name) => this.get(name))) callback(this) },
     get: (k) => (k === 'webServer' ? { register: (r) => { routes.set(r.path, r); return () => {} } } : undefined),
+    on: () => () => {},
     tools: { register: (t) => tools.set(t.name, t) },
     systemPrompt: { section: () => {} },
   }
@@ -51,11 +52,11 @@ const CONFIG = {
   encoding: 'utf-8', updateMode: 'off', updateCheckIntervalMs: 0,
 }
 
-async function loadPlugin(home) {
+async function loadPlugin(home, config = {}) {
   process.env.DSH_HOME = home
   const mod = await import(`../lib/index.js?routes=${Math.random()}`)
   const { ctx, routes } = makeCtx()
-  await mod.apply(ctx, { ...CONFIG })
+  await mod.apply(ctx, { ...CONFIG, ...config })
   return { routes, mod }
 }
 
@@ -230,6 +231,30 @@ test('persistPassword: no password requested → nothing is stored, nothing is w
   assert.equal(res.stored, 'none')
   assert.equal(res.warning, '')
 })
+
+test('tool-mode status reports only allowlisted transparent capabilities and is GET-only', async () => {
+  const home = makeHome()
+  const previousHome = process.env.DSH_HOME
+  try {
+    const { routes } = await loadPlugin(home, { executionMode: 'transparent', password: 'do-not-return' })
+    const status = await call(routes, '/dsh-remote/tool-mode', { method: 'GET' })
+    assert.equal(status.rejected, null)
+    assert.equal(status.status, 200)
+    assert.equal(status.json.mode, 'transparent')
+    assert.deepEqual(status.json.remoteTools, ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash'])
+    assert.equal(status.json.projectPlugins, 'unsupported')
+    assert.equal(status.json.reloadRequired, true)
+    assert.equal(JSON.stringify(status.json).includes('do-not-return'), false)
+
+    const denied = await call(routes, '/dsh-remote/tool-mode', { method: 'POST' })
+    assert.equal(denied.status, 405)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 
 test('persistPassword: backend "plain" never touches the OS store', async () => {
   let called = false

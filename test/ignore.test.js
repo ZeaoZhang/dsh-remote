@@ -17,6 +17,20 @@ test('defaults ignore common build/vcs dirs', () => {
   assert.equal(isIgnored('dist', true), true)
 })
 
+test('defaults ignore credential-bearing env/config/key/state files', () => {
+  const isIgnored = compileIgnore(DEFAULT_IGNORE)
+  for (const rel of [
+    '.env', '.env.production', 'apps/api/.env.local', '.envrc',
+    '.ssh/id_ed25519', '.aws/credentials', '.kube/config',
+    '.config/gh/hosts.yml', '.docker/config.json', '.npmrc', '.netrc',
+    'certs/server.pem', 'keys/release.key', 'secrets.json',
+    'terraform.tfstate', 'infra/terraform.tfstate.backup',
+  ]) assert.equal(isIgnored(rel, false), true, `${rel} should be ignored`)
+  assert.equal(isIgnored('README.md', false), false)
+  assert.equal(isIgnored('src/index.js', false), false)
+})
+
+
 test('basename patterns match at any depth; dir patterns cover children', () => {
   const isIgnored = compileIgnore(['vendor/'])
   assert.equal(isIgnored('vendor', true), true)

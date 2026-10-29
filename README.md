@@ -45,7 +45,7 @@ DSH 的 Web 界面刻意只监听 `127.0.0.1`（CLI 为安全拒绝 `--host 0.0.
 
 其余要点：
 
-- **22 个模型工具**（便于复制/检索）：`rw_info`、`rw_connect`、`rw_machines`、`rw_pick_workspace`、`rw_list_dir`、`rw_stat`、`rw_read_file`、`rw_write_file`、`rw_edit`、`rw_append`、`rw_mkdir`、`rw_remove`、`rw_move`、`rw_exec`、`rw_search`、`rw_download`、`rw_upload`、`rw_sync`、`rw_push`、`rw_forward`、`rw_disconnect`、`rw_deploy_probe`。
+- **legacy 模式的 22 个模型工具**（便于复制/检索）：`rw_info`、`rw_connect`、`rw_machines`、`rw_pick_workspace`、`rw_list_dir`、`rw_stat`、`rw_read_file`、`rw_write_file`、`rw_edit`、`rw_append`、`rw_mkdir`、`rw_remove`、`rw_move`、`rw_exec`、`rw_search`、`rw_download`、`rw_upload`、`rw_sync`、`rw_push`、`rw_forward`、`rw_disconnect`、`rw_deploy_probe`。
 - **会话列表里区分本地/远程**（`0.8.43+`）—— 远程会话的行首有一个**绿点**，悬停显示 `user@host:port` 与远端路径；打开该会话后，标题栏还会常显一个主机标签（本地会话两者都没有）。判定只看会话 cwd 是否落在 `$DSH_HOME/remote-workspaces/…` 镜像里，所以「保存过但没在用」的机器不会给本地会话打标。
 - **把远端机器的 DSH 界面挂到本机**（`0.8.36+`）—— 不用在远端开任何端口：插件主动 SSH 连过去，在远端**只监听 `127.0.0.1`** 地起一个 `dsh web`，再把端口经隧道搬回本机的一个 loopback 端口。地址带一次性登录令牌，只在本机这次跳转里用一次。
 - **连不上时一键体检与部署**（`0.8.36+`）—— **连不上大多不是插件的问题，而是远端 dsh 的版本或环境不对**。体检（只读）会报出平台/node/npm/dsh 版本、**原生模块能否启动**、代理与 npm 源，并给出修复建议；「部署并验证」把它装到远端**私有目录**（不写系统目录、不改 PATH、不覆盖你在用的版本，删目录即回滚）并逐步校验。按钮**不再需要先体检**——直接点即可（`0.8.40+`），部署过程自己会重新体检。失败还能交给内置的 `dsh-remote-deploy` 技能排查。
@@ -258,13 +258,16 @@ scripts/dev-run.sh --status    # 是否在运行
 | `webInstallPrefix` | string | `''` | 自动部署装到远端的哪个目录；留空用 `$HOME/.dsh-remote/dsh`（不写系统目录、不改 PATH） |
 | `webInstallVersion` | string | `0.1.5-rc.2` | 自动部署安装的 dsh 版本；默认值是第一个在 Linux 上能启动 web 的版本 |
 | `webInstallRegistry` | string | `''` | 安装用的 npm 源；**留空沿用远端自己的配置**，不会覆盖内网镜像 |
-| `localTools` | string | `bootstrap` | 本地 session（cwd 不在远程镜像里）暴露哪些 `rw_*` 工具（issue #63）：`bootstrap`=只暴露配置闭环 `rw_machines`/`rw_connect`/`rw_pick_workspace`（其余 19 个在本地 session 必然报 "this session is LOCAL"，暴露只是白占 schema）；`none`=完全不暴露 `rw_*`（远程配置只能走设置页）；`all`=旧的 full 暴露。远程 session（cwd 在镜像里）不受影响，始终全量；非法值按 `bootstrap` 处理 |
+| `executionMode` | string | `legacy` | 标准 DSH 工具执行模式：`legacy` 保持本地镜像 + `rw_*`；实验性的 `transparent` 只在 remote mirror Agent 上将标准工具路由到远端。transparent profile **不注册任何 `rw_*` 模型工具**（本地 Agent 也不暴露）；连接和选目录走 Settings UI。`read`/`write`/`edit` 受远端 workspace root 限制，更新已有文件需先读，冲突返回 `FS_STALE_VERSION`；`read_image` 需 image-capable 模型和部署附件策略，原图传输上限 32 MiB；`glob`/`grep` 使用远端 PATH 中的 `rg` 并保留 DSH caps/spill，无 rg 时 fail-closed；helper 握手会预检 `rg` 与 bwrap，缺失项写入插件日志和状态。`bash` 仅前台；`read-only`/`workspace-write` 需远端 Linux bwrap，按 DSH session policy 映射 root；沙箱只挂载运行时路径和选定 workspace，隐藏远端 home、只读挂载 `/etc` 并禁用网络；仅显式 `danger-full-access` 可不隔离。background、per-call escalation、PTY、断线恢复未支持；每条输出流最多 256 KiB 且不在本机 spill。Node 与 helper cache 路径必须解析到 writable workspace 外；读取使用 O_NOFOLLOW 与 inode 复核，mutation 父目录在提交前复核但最终 rename 仍有窄 TOCTOU 窗口；已在 Ubuntu 22.04.5 / bubblewrap 0.6.1 上完成真实 SSH 边界验证。Settings 页只读显示已加载模式；更改需通过 DSH profile 配置并重新加载插件，本页不写入第二份配置。transparent 模式还会在标准文件操作前用 helper 刷新 root 和最多 16 层祖先的 `AGENTS.md`/`CLAUDE.md`（每文件上限 256 KiB，拒绝 symlink），由 DSH core 唯一注入；本地镜像冲突时远端操作 fail-closed。 |
+| `localTools` | string | `bootstrap` | 仅在 `legacy` 模式控制本地 session 暴露哪些 `rw_*` 工具（issue #63）：`bootstrap`=只暴露配置闭环 `rw_machines`/`rw_connect`/`rw_pick_workspace`；`none`=不暴露；`all`=旧行为。`transparent` 模式不注册 `rw_*`，此项无效。|
 
 > 权威清单是 `lib/index.js` 里的 `Config` schema，本表与之一致。
 
 ## 常见问题 / 排查
 
-**`@` 能列出远程文件，但内置读文件工具打不开** —— harness 自带工具看到的是**本地镜像**，要等 `rw_sync` 下载后才有内容。读远程文件请用 `rw_read_file` 或侧栏远程文件 tab。
+**内置文件工具没有读到最新远端文件** — 默认 `executionMode=legacy` 时，内置工具看到的是本地镜像，须先用 `rw_sync` 下载。实验性的 `executionMode=transparent` 会让远端 mirror session 的标准 `read`/`write`/`edit`/`read_image`/`glob`/`grep` 直接操作远端；`glob`/`grep` 使用原生 DSH search runner，要求远端 PATH 中有 `rg`，并保留 DSH caps/spill；缺少 `rg` 时 fail-closed。helper 启动握手会预检 `rg` 与 bwrap，并在依赖缺失时记录日志。`read_image` 受模型能力、部署附件限制和 32 MiB helper 上限约束。远端 `bash` 目前仅支持前台：read-only/workspace-write 必须有可用 Linux bwrap，runner 缺失时命令不会执行；沙箱仅挂载运行时路径及选定 workspace，远端 home 不可见、`/etc` 只读且网络隔离；danger-full-access 按 DSH session policy 在远端不隔离运行。后台任务、单次权限 escalation、PTY、断线恢复和本地全量输出 spill 尚不支持；当前最大收集 256 KiB/stream。Node 与 helper cache 路径必须位于 writable workspace 外；读取使用 no-follow 文件描述符校验，写入提交前复核父目录但仍有窄 rename 竞态。真实 SSH sandbox 已在 Ubuntu 22.04.5 / bubblewrap 0.6.1 上验证；仍建议生产保持 `legacy`，除非接受该远端 profile 的安全属性。
+
+**远端项目 skills 和插件声明如何处理？** transparent Agent 只从远端 `.dsh/skills` 与 `.agents/skills` 发现项目技能，正文按 hash/version 从远端读取；本机 `$DSH_HOME/remote-project-config/<workspace-hash>/manifest.json` 只存元数据，不存 skill 正文。每个 Agent 的 scope 隔离技能；mirror 中残留但远端已不存在的技能会被禁用。项目插件声明只记为“不支持”：当前 DSH 从 `$DSH_HOME/profiles/<profile>` 加载插件，不会复制或执行远端 `package.json`、`node_modules`、`cordis.patch.yml`。宿主 ConfigEditor 只写入/重载 profile patch，没有 project/Agent config overlay；compatibility exemption 只核验精确 package@version 兼容性，不是项目插件执行批准。宿主自己的全局 instructions/skills 仍按 DSH 原规则加载，不会同步远端用户级配置；远端 `.env` / `.credentials.yaml` 不纳入项目配置。
 
 **远程会话里的文件链接打不开**（issue #55）—— 已修。链接被点开时 harness 会把它变成
 `dsh-resource://file/session/<会话>/<路径>`，然后交给内置的文本预览去读；而那个预览读的是**本机**
@@ -307,7 +310,7 @@ system prompt，提示模型编辑前用 `rw_read_file` 阅读嵌套层的指令
 远端修改后下次触碰即重新注入；注入过的文件被删除会发一条「已移除」提示；单次注入有 16 KB 预算；
 机器离线时整条链路静默降级，既不挂工具调用也不挂 prompt 组装。注入消息用插件自己的
 `source.kind`（`dsh-remote-instructions`），核心的状态机只认领它自己的 `agent-instructions`，两条
-注入路径不会互相打架。
+注入路径不会互相打架。transparent 模式走另一条边界：标准文件操作前由持久 helper 读取工作区根与最多 16 层祖先中的 `AGENTS.md`/`CLAUDE.md`（单文件最多 256 KiB、拒绝 symlink），安全更新本地镜像后由 DSH core 唯一注入；本地副本冲突时远端操作 fail-closed。
 
 **`rw_exec` 能像内置 shell 那样自定义超时/取消/转后台吗？**（issue #70）—— 能（0.8.53+）。
 底层 `pool.exec` 本来就支持 `timeoutMs` 与 `AbortSignal`，缺的是接线，现在补齐三件事：
@@ -368,7 +371,7 @@ Host devbox
 
 **Windows 远程** —— 全部走 SFTP，不依赖 POSIX shell；中文文件用 `encoding=gbk`。
 
-**镜像里缺目录** —— 默认 ignore 会跳过 `.git`/`node_modules` 等；在 `$DSH_HOME/remote-workspaces/.dsh-remote-ignore` 调整（gitignore 语法）。
+**镜像里缺目录** — 默认 ignore 会跳过 `.git`/`node_modules` 等，也会双向排除 `.env*`（含 `.env.example`）、`.ssh`/云凭据目录、私钥后缀、`.npmrc`/`.netrc` 和 Terraform state；这是保守安全默认。用户规则只追加，不支持 `!` 反向包含。新规则不会自动删除本地镜像或远端里已有的文件；先检查副本，再分别手动清理不需要的数据。可在 `$DSH_HOME/remote-workspaces/.dsh-remote-ignore` 继续追加忽略规则（受支持的 gitignore 子集）。
 
 **保存远程文件报 409** —— 打开后远端已被改动，重新读取再编辑。
 

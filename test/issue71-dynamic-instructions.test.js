@@ -17,7 +17,8 @@
 //     core's `agent-instructions` reconcile never claims it.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -185,6 +186,84 @@ test('a deleted instruction produces a removal notice scoped to the touched chai
   } finally { cleanup() }
 })
 
+test('helper-backed refresh mirrors remote instructions and removes only clean tracked copies', async () => {
+  const { dir, cleanup } = mirror()
+  try {
+    const tracker = createInjectionTracker({ throttleMs: 0 })
+    const remote = new Map([
+      ['/root/AGENTS.md', '# root v1\n'],
+      ['/root/a/AGENTS.md', '# a v1\n'],
+    ])
+    const calls = []
+    const readInstruction = async (remotePath) => {
+      calls.push(remotePath)
+      if (!remote.has(remotePath)) throw Object.assign(new Error('missing'), { code: 'REMOTE_NOT_FOUND' })
+      const content = remote.get(remotePath)
+      return { path: remotePath, size: Buffer.byteLength(content), mtime: 10, content, version: createHash('sha256').update(content).digest('hex') }
+    }
+    const args = {
+      readInstruction,
+      remoteRoot: '/root',
+      touched: '/root/a/src/file.ts',
+      mirrorDir: dir,
+      tracker,
+      sessionId: 's-helper',
+      includeRoot: true,
+    }
+    const first = await refreshTouched(args)
+    assert.ok(calls.includes('/root/AGENTS.md'), 'transparent baseline includes root instructions')
+    assert.ok(calls.includes('/root/a/AGENTS.md'), 'nested ancestors are refreshed')
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# root v1\n')
+    assert.equal(readFileSync(path.join(dir, 'a', 'AGENTS.md'), 'utf8'), '# a v1\n')
+    assert.deepEqual(first.conflicts, [])
+
+    remote.delete('/root/a/AGENTS.md')
+    const second = await refreshTouched(args)
+    assert.deepEqual(second.mirror.removed, ['a/AGENTS.md'])
+    assert.equal(existsSync(path.join(dir, 'a', 'AGENTS.md')), false)
+
+    remote.set('/root/AGENTS.md', '# root v2\n')
+    writeFileSync(path.join(dir, 'AGENTS.md'), '# local edit\n')
+    const third = await refreshTouched(args)
+    assert.deepEqual(third.conflicts, ['AGENTS.md'])
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# local edit\n')
+  } finally { cleanup() }
+})
+
+test('helper-backed refresh rejects a content/version mismatch before mirroring', async (t) => {
+  const { dir, cleanup } = mirror()
+  try {
+    const tracker = createInjectionTracker({ throttleMs: 0 })
+    await assert.rejects(refreshTouched({
+      readInstruction: async (remotePath) => ({
+        path: remotePath,
+        size: Buffer.byteLength('tampered'),
+        mtime: 10,
+        content: 'tampered',
+        version: createHash('sha256').update('expected').digest('hex'),
+      }),
+      remoteRoot: '/root', touched: '/root/a/file.ts', mirrorDir: dir,
+      tracker, sessionId: 's-corrupt', includeRoot: true,
+    }), /SHA-256 version/)
+    assert.equal(existsSync(path.join(dir, 'AGENTS.md')), false)
+  } finally { cleanup() }
+})
+
+
+test('helper-backed refresh propagates transport failures without deleting the last mirror snapshot', async () => {
+  const { dir, cleanup } = mirror()
+  try {
+    const tracker = createInjectionTracker({ throttleMs: 0 })
+    writeFileSync(path.join(dir, 'AGENTS.md'), '# last good\n')
+    const error = Object.assign(new Error('connection lost'), { code: 'ECONNRESET' })
+    await assert.rejects(refreshTouched({
+      readInstruction: async () => { throw error },
+      remoteRoot: '/root', touched: '/root/a/file.ts', mirrorDir: dir,
+      tracker, sessionId: 's-offline', includeRoot: true,
+    }), /connection lost/)
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# last good\n')
+  } finally { cleanup() }
+})
 test('an offline machine yields no injection instead of throwing', async () => {
   const tracker = createInjectionTracker({ throttleMs: 0 })
   const deadSftp = { stat: async () => { throw new Error('offline') }, readFile: async () => { throw new Error('offline') } }

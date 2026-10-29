@@ -17,7 +17,7 @@
 // negative-caching index, and the offline-machine prompt-section behaviour.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -84,6 +84,17 @@ test('scanInstructionFiles does not follow symlinked directories', async () => {
       : list)
   const files = await scanInstructionFiles(sftp, '/proj')
   assert.deepEqual(files.map((f) => f.rel), ['real/AGENTS.md'], 'the symlinked dir must not be entered')
+})
+
+test('scanInstructionFiles rejects a candidate file that lstat reports as a symlink', async () => {
+  const fs = new MemFs()
+  seed(fs, { 'proj/AGENTS.md': '# linked rules\n' })
+  const sftp = makeSftp(fs)
+  sftp.lstat = async (remote) => remote === '/proj/AGENTS.md'
+    ? { size: 0, mtime: 1, isDirectory: () => false, isSymbolicLink: () => true }
+    : fs.statSync(remote)
+
+  assert.deepEqual(await scanInstructionFiles(sftp, '/proj'), [])
 })
 
 test('extractHeadings + isInstructionName', () => {
@@ -166,6 +177,51 @@ test('syncInstructionsToMirror never clobbers a local edit, but pulls a remote c
   } finally { cleanup() }
 })
 
+test('syncInstructionsToMirror detects same-size same-second local edits by hash', async () => {
+  const { dir, cleanup } = makeMirror()
+  try {
+    const original = await scanFrom({ 'proj/AGENTS.md': '# v1\n' })
+    syncInstructionsToMirror(original, dir)
+    const localPath = path.join(dir, 'AGENTS.md')
+    const localStat = statSync(localPath)
+    writeFileSync(localPath, '# x\n')
+    utimesSync(localPath, new Date(localStat.mtimeMs), new Date(localStat.mtimeMs))
+
+    const result = syncInstructionsToMirror(await scanFrom({ 'proj/AGENTS.md': '# v1\n' }), dir)
+    assert.deepEqual(result.written, [])
+    assert.deepEqual(result.conflicts, ['AGENTS.md'])
+    assert.equal(readFileSync(localPath, 'utf8'), '# x\n')
+  } finally { cleanup() }
+})
+test('syncInstructionsToMirror refuses symlink leaves and parents', () => {
+  const { dir, cleanup } = makeMirror()
+  const outside = mkdtempSync(path.join(tmpdir(), 'dsh-remote-instr-outside-'))
+  try {
+    const outsideLeaf = path.join(outside, 'leaf.md')
+    writeFileSync(outsideLeaf, 'outside leaf must survive\n')
+    symlinkSync(outsideLeaf, path.join(dir, 'AGENTS.md'))
+    const leafResult = syncInstructionsToMirror([
+      { rel: 'AGENTS.md', size: 20, mtime: 1, content: Buffer.from('remote content\n') },
+    ], dir)
+    assert.deepEqual(leafResult.written, [])
+    assert.equal(readFileSync(outsideLeaf, 'utf8'), 'outside leaf must survive\n')
+
+    const outsideDir = path.join(outside, 'parent')
+    mkdirSync(outsideDir)
+    const outsideChild = path.join(outsideDir, 'CLAUDE.md')
+    writeFileSync(outsideChild, 'outside parent must survive\n')
+    symlinkSync(outsideDir, path.join(dir, 'docs'))
+    const parentResult = syncInstructionsToMirror([
+      { rel: 'docs/CLAUDE.md', size: 24, mtime: 1, content: Buffer.from('remote rules\n') },
+    ], dir)
+    assert.deepEqual(parentResult.written, [])
+    assert.equal(readFileSync(outsideChild, 'utf8'), 'outside parent must survive\n')
+  } finally {
+    cleanup()
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
 // ── prompt index ───────────────────────────────────────────────────────────
 
 test('formatInstructionIndex lists paths with headings, not full text', () => {
@@ -177,6 +233,11 @@ test('formatInstructionIndex lists paths with headings, not full text', () => {
   assert.match(out, /\/srv\/repo\/docs\/CLAUDE\.md/)
   assert.match(out, /rw_read_file/)
   assert.doesNotMatch(out, /正文/, 'the index must never carry file content')
+  const transparent = formatInstructionIndex([
+    { rel: 'AGENTS.md', remote: '/srv/repo/AGENTS.md', size: 20, headings: [], mirrored: true },
+  ], (p) => p, 'read')
+  assert.match(transparent, /read them with read before editing/)
+  assert.doesNotMatch(transparent, /rw_read_file/)
 })
 
 test('createInstructionIndex caches scans, dedups in-flight, negative-caches failures', async () => {
@@ -204,6 +265,10 @@ test('createInstructionIndex caches scans, dedups in-flight, negative-caches fai
     index.note({ pool, ws: '/proj', mirrorDir: dir })
     await new Promise((r) => setTimeout(r, 40))
     assert.equal(sftpCalls, 1)
+    index.invalidate(dir)
+    assert.equal(index.get(dir), null)
+    await index.refresh({ pool, ws: '/proj', mirrorDir: dir })
+    assert.equal(sftpCalls, 2, 'invalidated mirror index is rescanned')
 
     // Failure path: an unreachable machine is negative-cached — one failed
     // attempt, then silence (prompt assembly must not become a connect loop).
@@ -221,7 +286,46 @@ test('createInstructionIndex caches scans, dedups in-flight, negative-caches fai
   } finally { cleanup() }
 })
 
-// ── prompt-section wiring (offline machine: must stay quiet, never hang) ───
+test('invalidate detaches an in-flight scan so stale results cannot win', async () => {
+  const oldFs = new MemFs()
+  seed(oldFs, { 'proj/AGENTS.md': '# old rules\n' })
+  const newFs = new MemFs()
+  seed(newFs, { 'proj/AGENTS.md': '# new rules\n' })
+  let calls = 0
+  let started
+  let releaseOld
+  const startedPromise = new Promise((resolve) => { started = resolve })
+  const oldGate = new Promise((resolve) => { releaseOld = resolve })
+  const pool = {
+    async sftp() {
+      calls += 1
+      if (calls === 1) {
+        started()
+        await oldGate
+        return makeSftp(oldFs)
+      }
+      return makeSftp(newFs)
+    },
+  }
+  const { dir, cleanup } = makeMirror()
+  try {
+    const index = createInstructionIndex()
+    const staleRefresh = index.refresh({ pool, ws: '/proj', mirrorDir: dir })
+    await startedPromise
+    index.invalidate(dir)
+    const fresh = await index.refresh({ pool, ws: '/proj', mirrorDir: dir })
+    assert.equal(fresh.files[0].headings[0], 'new rules')
+    releaseOld()
+    await staleRefresh
+    assert.equal(index.get(dir).files[0].headings[0], 'new rules')
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# new rules\n')
+    assert.equal(calls, 2)
+  } finally {
+    releaseOld?.()
+    cleanup()
+  }
+})
+
 
 function makeHomeWithMirror() {
   const home = mkdtempSync(path.join(tmpdir(), 'dsh-remote-instr68-'))
