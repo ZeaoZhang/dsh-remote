@@ -429,3 +429,67 @@ test('an incomplete or failing host snapshot degrades instead of skipping remote
   await broken.listeners.get('agent/created')({ agent: degraded.agent })
   assert.deepEqual([...degraded.skillProviders.keys()], ['dsh-remote-project'])
 })
+
+test('pre-step installs transparent overrides for a resumed remote session', async (t) => {
+  const { home, mirrorDir } = makeHome()
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const mod = await import(`../lib/index.js?pre-step-heal=${Math.random()}`)
+  const fixture = makeCtx(['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash'])
+  await mod.apply(fixture.ctx, { ...CONFIG })
+  const remote = agentFor(mirrorDir, fixture.tools)
+
+  // A session restored from disk never emitted agent/created: its tool scope
+  // still resolves the local standard tools.
+  assert.equal(remote.scoped.size, 0)
+  let continued = 0
+  const result = await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => {
+    continued += 1
+    return 'continued'
+  })
+  assert.equal(result, 'continued')
+  assert.equal(continued, 1)
+  assert.ok(remote.scoped.has('read'))
+  assert.ok(remote.scoped.has('bash'))
+  assert.notEqual(remote.scoped.get('read'), fixture.tools.get('read'))
+
+  await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
+  assert.equal(remote.scoped.size, 0)
+})
+
+test('pre-step keeps standard tools fail-closed when a remote session cannot be set up', async (t) => {
+  const { home } = makeHome()
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const brokenCwd = path.join(home, 'remote-workspaces', '127.0.0.11-lucas-1', 'broken')
+  mkdirSync(brokenCwd, { recursive: true })
+  const mod = await import(`../lib/index.js?pre-step-failclosed=${Math.random()}`)
+  const fixture = makeCtx(['read', 'bash'])
+  await mod.apply(fixture.ctx, { ...CONFIG })
+  const remote = agentFor(brokenCwd, fixture.tools)
+
+  const result = await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => 'continued')
+  assert.equal(result, 'continued')
+  const stub = remote.scoped.get('read')
+  assert.ok(stub, 'read must be replaced by a fail-closed stub')
+  await assert.rejects(
+    stub.execute({ file_path: '/root/remote/file' }, { agent: remote.agent, signal: new AbortController().signal }),
+    (error) => error.code === 'REMOTE_TRANSPARENT_SETUP_FAILED',
+  )
+  assert.equal(fixture.calls.read, undefined)
+
+  // The retry window keeps the stubs; a second step must not quietly fall back.
+  await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => 'continued')
+  assert.equal(remote.scoped.get('read'), stub)
+  await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
+})

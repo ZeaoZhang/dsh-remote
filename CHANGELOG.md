@@ -3,6 +3,26 @@
 All notable changes to **dsh-remote**.
 
 ## Unreleased
+### 恢复的透明会话自动补装工具覆盖，不再静默回落到本地执行
+
+透明模式只在 `agent/created` 时安装标准工具覆盖。从磁盘恢复的会话、以及插件重载前创建的会话
+不会收到该事件，于是继续使用宿主本地的 `read`/`bash` 等实现：远端绝对路径被当作本地路径，
+`bash` 直接以本地 cwd 调 `sandbox-exec`，报 `spawn sandbox-exec ENOENT`，只能新建会话才恢复。
+
+- **宿主**（`lib/index.js`）：`agent/created` 的安装逻辑抽成幂等的 `setupTransparentAgent`
+  （单飞、失败回滚）；`agent/pre-step` 发现镜像会话缺少覆盖时自动补装（失败后 15s 内不再重试）。
+  安装失败时给所有可见标准工具注册 fail-closed 桩（`REMOTE_TRANSPARENT_SETUP_FAILED`），
+  不再留下可执行的本地实现。修复 `read` 的 opaque 资源分支调用未定义 `resolveBinding` 导致的
+  `resolveBinding is not defined`（改为 `bindingFor`）。
+- **工具层**（`lib/transparent-tools.js`）：某个标准工具被 preset 隐藏不再让整个安装失败；
+  可见但不可包装的工具注册失败桩。`read`/`read_image` 在 `REMOTE_CHANNEL_CLOSED` 后
+  失效当前连接并重试一次；`write`/`edit`/`bash` 不重放（远端结果未知）。
+- **传输层**（`lib/pool.js`、`lib/remote-rpc.js`）：`openExecChannel` 遇到半开连接先
+  `invalidate()` 再重试一次，与 `exec`/`sftp` 一致；新增 `isRemoteTransportClosed`。
+- **搜索桥**（`lib/transparent-search.js`）：`glob`/`grep` 的远端传输在通道断开后重试一次。
+- 新增单测：helper 通道关闭后重开、pool 首次 channel open 失败后重试、read 重试一次、
+  write 不重放、pre-step 为恢复会话补装覆盖、安装失败时标准工具 fail-closed。
+
 ### 指令软链不再中断远端一轮（`CLAUDE.md -> AGENTS.md`）
 
 `CLAUDE.md -> AGENTS.md` 是常见的仓库约定，但 transparent 的 pre-step 指令刷新把它当致命错误：

@@ -553,3 +553,53 @@ test('write and edit never consult opaque skill resources', async (t) => {
   assert.equal(edited.before, 'a', 'a workspace edit still works after the opaque probe declines')
   assert.equal(consulted, 1, 'only read may consult remote skill resources')
 })
+
+test('read retries once after the remote channel drops', async (t) => {
+  let attempts = 0
+  const fixture = createFixture(t, {
+    request(op, payload) {
+      assert.equal(op, 'read')
+      attempts += 1
+      if (attempts === 1) {
+        const error = new Error('remote helper exited')
+        error.code = 'REMOTE_CHANNEL_CLOSED'
+        throw error
+      }
+      return {
+        path: payload.path,
+        offset: 1,
+        lines: [{ number: 1, text: 'remote' }],
+        totalLines: 1,
+        truncatedByBytes: false,
+        version: READ_VERSION,
+      }
+    },
+  })
+  const read = fixture.scopedTools.get('read')
+  const result = await read.execute({ file_path: '/srv/project/src/app.js' }, fixture.exec)
+  assert.equal(result.path, '/srv/project/src/app.js')
+  assert.equal(attempts, 2)
+  assert.equal(fixture.localCalls.read, 0)
+  fixture.dispose()
+})
+
+test('write is not replayed when the remote channel drops', async (t) => {
+  let attempts = 0
+  const fixture = createFixture(t, {
+    request(op) {
+      assert.equal(op, 'write')
+      attempts += 1
+      const error = new Error('remote helper exited')
+      error.code = 'REMOTE_CHANNEL_CLOSED'
+      throw error
+    },
+  })
+  const write = fixture.scopedTools.get('write')
+  await assert.rejects(
+    write.execute({ file_path: '/srv/project/src/app.js', content: 'next' }, fixture.exec),
+    /remote helper exited/,
+  )
+  assert.equal(attempts, 1)
+  assert.equal(fixture.localCalls.write, 0)
+  fixture.dispose()
+})

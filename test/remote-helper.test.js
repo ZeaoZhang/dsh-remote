@@ -225,3 +225,23 @@ test('helper GC removes only old, content-shaped, inactive hash directories', as
   assert.ok(dirs.has(`${root}/${malformedHash}`))
   assert.ok(dirs.has(`${root}/${linkedHash}`))
 })
+
+test('broker reopens a fresh helper channel after the cached one closes', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dsh-helper-reopen-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(path.join(root, 'hello.txt'), 'remote data\n')
+  const pool = fakePool(root)
+  const broker = new RemoteHelperBroker()
+  t.after(() => broker.close())
+
+  const first = await broker.get(pool, root)
+  first.rpc.close()
+  assert.equal(first.rpc.closed, true)
+
+  const second = await broker.get(pool, root)
+  assert.notEqual(second, first)
+  assert.notEqual(second.rpc, first.rpc)
+  assert.equal(pool.opens, 2)
+  const read = await second.rpc.request('read', { path: path.join(realpathSync(root), 'hello.txt'), offset: 1, limit: 10 })
+  assert.equal(read.lines[0].text, 'remote data')
+})
