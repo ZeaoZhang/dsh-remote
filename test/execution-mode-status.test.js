@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { executionModeStatus } from '../lib/index.js'
+import { executionModeStatus, skillResourceResult } from '../lib/index.js'
 
 test('tool-mode status is allowlisted, read-only and legacy by default', () => {
   const status = executionModeStatus({ host: 'secret.example', password: 'not returned' })
@@ -19,6 +19,7 @@ test('tool-mode status is allowlisted, read-only and legacy by default', () => {
     confinedBashRequiresLinuxBwrap: false,
     remoteDependencyPreflight: 'disabled',
     remotePrerequisites: null,
+    remoteMcp: null,
     backgroundJobs: false,
     pty: false,
     taskRecovery: false,
@@ -35,9 +36,23 @@ test('transparent mode status lists only enabled routes and known limitations', 
   assert.equal(status.projectConfig, 'profile-scoped-only')
   assert.equal(status.projectPlugins, 'unsupported')
   assert.equal(status.searchRequiresRemoteRg, true)
-  assert.equal(status.confinedBashRequiresLinuxBwrap, true)
+  assert.equal(status.confinedBashRequiresLinuxBwrap, false)
   assert.equal(status.remoteDependencyPreflight, 'helper-handshake')
-  assert.deepEqual(status.remotePrerequisites, { search: 'ripgrep', confinedBash: 'bubblewrap' })
+  assert.deepEqual(status.remotePrerequisites, { search: 'ripgrep' })
+  assert.deepEqual(status.remoteMcp, { transport: 'stdio', dependency: '@deepseek-ai/dsh-mcp-client' })
   assert.equal(status.backgroundJobs, false)
   assert.equal(status.taskRecovery, false)
+})
+
+test('skill resources are sliced into the standard read shape', () => {
+  const resource = { path: '/root/.dsh/skills/pdf/SKILL.md', text: 'one\ntwo\nthree\n' }
+  assert.deepEqual(skillResourceResult(resource, {}), {
+    path: '/root/.dsh/skills/pdf/SKILL.md',
+    offset: 1,
+    lines: ['one', 'two', 'three'],
+    totalLines: 3,
+  })
+  assert.deepEqual(skillResourceResult(resource, { offset: 2, limit: 1 }).lines, ['two'])
+  assert.throws(() => skillResourceResult(resource, { offset: 9 }), /offset 9 is out of range/)
+  assert.deepEqual(skillResourceResult({ path: '/x/empty.md', text: '' }, {}), { path: '/x/empty.md', offset: 1, lines: [], totalLines: 0 })
 })

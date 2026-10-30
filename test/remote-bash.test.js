@@ -163,6 +163,38 @@ test('danger-full-access still requires an absolute POSIX cwd', async (t) => {
   assert.equal(state.requests.length, 0)
 })
 
+test('danger-full-access maps a mirror cwd to the remote workspace root', async (t) => {
+  const state = fixture(t, {
+    request(op, payload) {
+      if (op !== 'bash_exec') return Promise.resolve({ accepted: true })
+      return Promise.resolve({
+        taskId: payload.taskId,
+        cwd: payload.cwd,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        aborted: false,
+        timeoutMs: 2000,
+        stdout: { text: '', truncated: false },
+        stderr: { text: '', truncated: false },
+        sandbox: { mode: 'danger-full-access', denied: false, enforcement: 'none' },
+      })
+    },
+  })
+  state.prepared.policy.mode = 'danger-full-access'
+  state.prepared.spec.sandboxPolicy.mode = 'danger-full-access'
+  state.prepared.policy.workspaceRoot = undefined
+  state.prepared.spec.workdir = path.join(state.mirrorDir, 'src')
+
+  await executeRemoteBash({
+    args: { command: 'pwd' }, exec: state.exec, binding: state.binding,
+    helper: state.helper, prepared: state.prepared,
+  })
+
+  const request = state.requests.find(({ op }) => op === 'bash_exec')
+  assert.equal(request.payload.cwd, '/srv/project/src', 'host-mode Bash must never receive the desktop mirror path')
+})
+
 test('caller abort cancels only the matching remote Bash task', async (t) => {
   const controller = new AbortController()
   let releaseExec

@@ -127,6 +127,7 @@ function createFixture(t, options = {}) {
     resolveBashSpec: options.resolveBashSpec,
     executeBash: options.executeBash,
     onRemoteMutation: options.onRemoteMutation,
+    readOpaqueResource: options.readOpaqueResource,
     beforeRemoteFileAccess: options.beforeRemoteFileAccess || (async (context) => {
       order.push(`before:${context.name}`)
     }),
@@ -516,4 +517,39 @@ test('unsupported tools fail closed without invoking their global local implemen
     assert.equal(fixture.localCalls[name], 0, `${name} must not fall back to local execute`)
   }
   assert.equal(fixture.requests.length, 0)
+})
+
+test('read serves remote skill resources outside the workspace without mirror or instruction work', async (t) => {
+  const calls = []
+  const fixture = createFixture(t, {
+    readOpaqueResource: async (args, exec) => {
+      calls.push({ args, agent: exec.agent })
+      if (args.file_path !== '/Users/someone/.dsh/skills/pdf/SKILL.md') return undefined
+      return { path: args.file_path, offset: 1, lines: [{ number: 1, text: '# pdf' }], totalLines: 1 }
+    },
+  })
+  const result = await fixture.scopedTools.get('read').execute({ file_path: '/Users/someone/.dsh/skills/pdf/SKILL.md' }, fixture.exec)
+  assert.deepEqual(result, { path: '/Users/someone/.dsh/skills/pdf/SKILL.md', offset: 1, lines: [{ number: 1, text: '# pdf' }], totalLines: 1 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].agent, fixture.agent)
+  assert.deepEqual(fixture.requests, [], 'opaque skill reads must not use the workspace RPC')
+  assert.deepEqual(fixture.order, [], 'opaque skill reads must skip instruction refresh and mirror mapping')
+  assert.equal(fixture.localCalls.read, 0, 'the local read tool must never run')
+})
+
+test('read falls through to the workspace path when no opaque resource matches', async (t) => {
+  const fixture = createFixture(t, { readOpaqueResource: async () => undefined })
+  const result = await fixture.scopedTools.get('read').execute({ file_path: 'notes.txt' }, fixture.exec)
+  assert.deepEqual(result.lines, [{ number: 1, text: 'remote' }])
+  assert.equal(fixture.requests[0].op, 'read')
+  assert.deepEqual(fixture.order, ['before:read', 'rpc:read'])
+})
+
+test('write and edit never consult opaque skill resources', async (t) => {
+  let consulted = 0
+  const fixture = createFixture(t, { readOpaqueResource: async () => { consulted += 1; return undefined } })
+  await fixture.scopedTools.get('read').execute({ file_path: 'notes.txt' }, fixture.exec)
+  const edited = await fixture.scopedTools.get('edit').execute({ file_path: 'notes.txt', old_string: 'a', new_string: 'b' }, fixture.exec)
+  assert.equal(edited.before, 'a', 'a workspace edit still works after the opaque probe declines')
+  assert.equal(consulted, 1, 'only read may consult remote skill resources')
 })

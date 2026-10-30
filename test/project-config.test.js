@@ -57,13 +57,14 @@ function fixture(t, options = {}) {
         requests.push({ op, payload })
         if (op === 'project_skills_manifest') return remoteManifest
         if (op === 'project_skill_read') {
-          if (!remoteManifest.entries.some((entry) => entry.path === payload.path)) {
+          if (!payload.resource && !remoteManifest.entries.some((entry) => entry.path === payload.path)) {
             const error = new Error('project skill no longer exists')
             error.code = 'ENOENT'
             throw error
           }
-          const currentVersion = createHash('sha256').update(currentText).digest('hex')
-          if (payload.expectedVersion !== currentVersion) {
+          const responseText = options.currentText || remoteManifest.entries.find((item) => item.path === payload.path)?.content || currentText
+          const currentVersion = createHash('sha256').update(responseText).digest('hex')
+          if (payload.expectedVersion !== undefined && payload.expectedVersion !== currentVersion) {
             const error = new Error('project skill changed after manifest creation')
             error.code = 'REMOTE_STALE_CONFIG'
             if (options.onStale) {
@@ -75,9 +76,9 @@ function fixture(t, options = {}) {
           }
           return {
             path: payload.path,
-            directory: skillDirectory,
+            directory: path.posix.dirname(payload.path),
             version: currentVersion,
-            text: currentText,
+            text: responseText,
           }
         }
         throw new Error(`unexpected helper operation: ${op}`)
@@ -90,7 +91,7 @@ function fixture(t, options = {}) {
     getHelper: async () => helper,
     localConfigRoot,
     mirrorRoot,
-    snapshotHostSkills: async () => hostSkills,
+    snapshotHostSkills: async () => ({ ...hostSkills, skills: [...hostSkills.skills] }),
     logger: { warn() {} },
     now: () => 100000,
   })
@@ -98,6 +99,100 @@ function fixture(t, options = {}) {
   state.bindControl({ invalidate() { invalidations += 1 } })
   return { helper, hostSkills, invalidations: () => invalidations, localConfigRoot, localHome, manifest: () => remoteManifest, setManifest: (value) => { remoteManifest = value }, mirrorRoot, requests, state, staleOnce: () => staleOnce }
 }
+
+test('server user skills replace host filesystem skills while other provider skills stay available', async (t) => {
+  const userDirectory = '/srv/user/custom-dsh/skills/review'
+  const remoteEntry = { ...entry(), path: `${userDirectory}/SKILL.md`, directory: userDirectory, source: 'user-dsh', rank: 300 }
+  const remoteManifest = { ...manifest([remoteEntry]), sourceRoots: [{ path: '/srv/user/custom-dsh/skills', source: 'user-dsh', rank: 300 }] }
+  const localSkills = [
+    { name: 'review', source: 'user-dsh', provider: 'filesystem', path: '/local/.dsh/skills/review/SKILL.md', rank: 300 },
+    { name: 'local-user', source: 'user-agents', provider: 'filesystem', path: '/local/.agents/skills/local-user/SKILL.md', rank: 400 },
+    { name: 'local-project', source: 'project-dsh', provider: 'filesystem', path: '/other/project/.dsh/skills/local-project/SKILL.md', rank: 100 },
+    { name: 'plugin-skill', source: 'plugin', provider: 'plugin', path: '/plugin/SKILL.md', rank: 600 },
+  ]
+  const state = fixture(t, { manifest: remoteManifest, hostSkills: { complete: true, skills: localSkills } })
+  const listed = await state.state.provider.list()
+  assert.deepEqual(listed.candidates.map((item) => item.name), ['review', 'local-user', 'local-project'])
+  assert.equal(listed.candidates[0].source, 'user-dsh')
+  assert.equal(listed.candidates[1].locator.suppressed, true)
+  assert.equal(listed.candidates[2].locator.suppressed, true)
+  assert.equal((await state.state.provider.get(listed.candidates[0])).path, remoteEntry.path)
+  assert.equal(await state.state.provider.get(listed.candidates[1]), undefined)
+
+  const resource = await state.state.readResource(`${userDirectory}/references/guide.md`)
+  assert.equal(resource.path, `${userDirectory}/references/guide.md`)
+  const request = state.requests.at(-1)
+  assert.equal(request.op, 'project_skill_read')
+  assert.equal(request.payload.resource, true)
+  assert.equal(request.payload.maxBytes, 128 * 1024)
+  const before = state.requests.length
+  assert.equal(await state.state.readResource('/srv/user/custom-dsh/credentials.json'), undefined)
+  assert.equal(await state.state.readResource(`${userDirectory}/../other/secret.md`), undefined)
+  assert.equal(state.requests.length, before)
+})
+
+test('complete server discovery serves every remote skill while incomplete host discovery retains local masks', async (t) => {
+  const remoteEntries = ['review', 'deploy'].map((name) => ({
+    ...entry(skillText(name, `Server ${name} instructions.`)),
+    path: `${root}/.dsh/skills/${name}/SKILL.md`,
+    directory: `${root}/.dsh/skills/${name}`,
+  }))
+  const localSkill = { name: 'local-user', source: 'user-dsh', provider: 'filesystem', rank: 300, path: '/local/.dsh/skills/local-user/SKILL.md' }
+  const host = { complete: true, skills: [localSkill] }
+  const state = fixture(t, { manifest: manifest(remoteEntries), hostSkills: host })
+  assert.equal((await state.state.provider.list()).complete, true)
+  const before = state.invalidations()
+
+  // The next local scan cannot see the formerly known host skill. Its mask
+  // must survive while both complete server entries remain loadable.
+  host.complete = false
+  host.skills = []
+  state.state.markDirty()
+  const listed = await state.state.provider.list()
+  assert.equal(listed.complete, false)
+  assert.equal(listed.remoteComplete, true)
+  assert.equal(listed.hostComplete, false)
+  assert.ok(state.invalidations() > before, 'completeness changes invalidate even when skill names are unchanged')
+  assert.deepEqual(listed.candidates.map((item) => item.name), ['review', 'deploy', 'local-user'])
+  for (const candidate of listed.candidates.filter((item) => !item.locator.suppressed)) {
+    assert.equal((await state.state.provider.get(candidate)).content, `Server ${candidate.name} instructions.`)
+  }
+  const mask = listed.candidates.find((item) => item.name === 'local-user')
+  assert.deepEqual(mask.invocation, { modelInvocable: false, userInvocable: false })
+  assert.equal(await state.state.provider.get(mask), undefined)
+  const saved = JSON.parse(readFileSync(path.join(state.localConfigRoot, 'manifest.json'), 'utf8'))
+  assert.equal(saved.complete, true)
+  assert.equal(saved.remoteComplete, true)
+  assert.equal(saved.hostComplete, false)
+
+  // A second partial observation must keep the first partial scan's masks.
+  host.skills = [{ ...localSkill, name: 'fresh-local' }]
+  state.state.markDirty()
+  await state.state.provider.list()
+  host.skills = []
+  state.state.markDirty()
+  const later = await state.state.provider.list()
+  assert.ok(later.candidates.some((item) => item.name === 'fresh-local' && item.locator.suppressed))
+  assert.ok(later.candidates.some((item) => item.name === 'local-user' && item.locator.suppressed))
+})
+
+test('an empty complete host view needs no local skill roots and keeps server completeness', async (t) => {
+  const state = fixture(t, { hostSkills: { skills: [], complete: true } })
+  const listed = await state.state.provider.list()
+  assert.equal(listed.complete, true)
+  assert.equal(listed.remoteComplete, true)
+  assert.equal(listed.hostComplete, true)
+  assert.deepEqual(listed.candidates.map((item) => item.name), ['review'])
+})
+
+test('user skill manifest entries cannot escape their declared server skill root', async (t) => {
+  const remoteEntry = { ...entry(), source: 'user-dsh', rank: 300, path: '/srv/user/private.md', directory: '/srv/user' }
+  const remoteManifest = { ...manifest([remoteEntry]), sourceRoots: [{ path: '/srv/user/.dsh/skills', source: 'user-dsh', rank: 300 }] }
+  const state = fixture(t, { manifest: remoteManifest })
+  const listed = await state.state.provider.list()
+  assert.equal(listed.complete, false)
+  assert.deepEqual(listed.candidates, [])
+})
 
 test('DSH skill frontmatter uses the host name, invocation, metadata, and body contract', () => {
   const parsed = parseRemoteSkillDocument(skillText())

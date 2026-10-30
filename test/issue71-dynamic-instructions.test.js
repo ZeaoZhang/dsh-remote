@@ -264,6 +264,50 @@ test('helper-backed refresh propagates transport failures without deleting the l
     assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# last good\n')
   } finally { cleanup() }
 })
+test('a refused symlinked candidate is skipped without aborting the sweep', async () => {
+  const { dir, cleanup } = mirror()
+  try {
+    const tracker = createInjectionTracker({ throttleMs: 0 })
+    const r = await refreshTouched({
+      readInstruction: async (remotePath) => {
+        if (remotePath.endsWith('/CLAUDE.md')) {
+          throw Object.assign(new Error('instruction symlinks are not followed'), { code: 'REMOTE_CONFIG_SYMLINK' })
+        }
+        const content = '# root rules\n'
+        return { path: remotePath, size: Buffer.byteLength(content), mtime: 10, content, version: createHash('sha256').update(content).digest('hex') }
+      },
+      remoteRoot: '/root', touched: '/root/file.ts', mirrorDir: dir,
+      tracker, sessionId: 's-refused', includeRoot: true,
+    })
+    assert.deepEqual(r.items.map((i) => i.rel), ['AGENTS.md'], 'the readable sibling still enters the context')
+    assert.deepEqual(r.skipped, ['CLAUDE.md'])
+    assert.deepEqual(r.conflicts, [], 'and the refusal is NOT turned into a fatal mirror conflict')
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# root rules\n')
+  } finally { cleanup() }
+})
+
+test('a CLAUDE.md alias resolving to AGENTS.md is injected once', async () => {
+  const { dir, cleanup } = mirror()
+  try {
+    const tracker = createInjectionTracker({ throttleMs: 0 })
+    const content = '# root rules\n'
+    // Both candidates resolve to the SAME canonical file, exactly as the helper
+    // reports for `CLAUDE.md -> AGENTS.md`.
+    const r = await refreshTouched({
+      readInstruction: async () => ({
+        path: '/root/AGENTS.md', size: Buffer.byteLength(content), mtime: 10, content,
+        version: createHash('sha256').update(content).digest('hex'),
+      }),
+      remoteRoot: '/root', touched: '/root/file.ts', mirrorDir: dir,
+      tracker, sessionId: 's-alias', includeRoot: true,
+    })
+    assert.deepEqual(r.items.map((i) => i.rel), ['AGENTS.md'], 'the rules are not duplicated into the context')
+    assert.deepEqual(r.skipped, [])
+    assert.deepEqual(r.conflicts, [])
+    assert.equal(readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), '# root rules\n')
+    assert.equal(existsSync(path.join(dir, 'CLAUDE.md')), false, 'the alias itself is not mirrored as a second copy')
+  } finally { cleanup() }
+})
 test('an offline machine yields no injection instead of throwing', async () => {
   const tracker = createInjectionTracker({ throttleMs: 0 })
   const deadSftp = { stat: async () => { throw new Error('offline') }, readFile: async () => { throw new Error('offline') } }

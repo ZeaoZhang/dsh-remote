@@ -1,6 +1,6 @@
 # dsh-remote 透明远端工作区重构计划
 
-状态：实施中。P1 已有 native/OpenSSH 持久 duplex、JSONL multiplex 和 POSIX helper，支持 read/write/edit/read_image/glob/grep 及有限前台 Bash。P0 已加入 opt-in `executionMode: transparent`：mirror-bound Agent 使用同名 scoped 文件工具；native glob/grep 通过可卸载的 subprocess bridge 在远端执行，保留 DSH tool identity/caps/spill；bash 通过 DSH resolved ShellSpec 与 effective session sandbox policy 交给远端 helper；所有成功文件操作发送 DSH observation/intent 事件；不支持的能力 fail-closed。legacy 仍是默认。后台任务重连、PTY、项目配置同步、UI、真实 Linux/bwrap SSH 验收和跨版本兼容均未完成。
+状态：实施中。P1 已有 native/OpenSSH 持久 duplex、JSONL multiplex 和 POSIX helper，支持 read/write/edit/read_image/glob/grep 及有限前台 Bash。P0 已加入 opt-in `executionMode: transparent`：mirror-bound Agent 使用同名 scoped 文件工具；native glob/grep 通过可卸载的 subprocess bridge 在远端执行，保留 DSH tool identity/caps/spill；bash 通过 DSH resolved ShellSpec 直接以 SSH 登录用户在远端主机上执行（不再应用 bwrap/沙箱）；所有成功文件操作发送 DSH observation/intent 事件；不支持的能力 fail-closed。legacy 仍是默认。后台任务重连、PTY、项目配置同步、UI、真实 Linux/bwrap SSH 验收和跨版本兼容均未完成。
 
 ## 1. 目标与范围
 
@@ -142,7 +142,7 @@ DSH 0.2.1-rc.3 的 `agent/created` payload 为 `{ agent, source, signal? }`，�
 
 实现远端 subprocess/shell、独立 helper、任务日志、输出 cursor、标准 jobs、进程树取消和重新附着。
 
-当前 transparent Bash 有 scoped foreground adapter：它以 DSH `sandboxPolicy.resolve({ session })` 和 `ctx.shell.resolve()` 取得 effective mode、workspace root、cwd、timeout 与 stdout cap，不调用本机 `ctx.shell.execute()`。helper 仅执行 POSIX Bash；`read-only`/`workspace-write` 仅支持 Linux bwrap，profile 对齐 `@deepseek-ai/dsh-sandbox-local/lib/index.js:22-38`（只读绑定 `/`、独立 PID namespace、`/proc`、`--die-with-parent`；workspace-write 另挂可写 `/tmp` 和映射后的工作区）。bwrap probe/实际启动失败均返回 `SANDBOX_UNAVAILABLE`，不回落未隔离执行；`danger-full-access` 只在 effective DSH policy 明确允许时运行。per-call escalation、background/promotion、PTY、任务重连/恢复和本机 spill 尚不支持；每个 stdout/stderr 最多收集 256 KiB。取消/timeout 会对目标进程组发 TERM，再按 grace 发 KILL；bwrap 模式额外使用 PID namespace，danger-full-access 下主动 daemonize 的后代仍可能逃逸。项目 root 与 helper cache 均要求在 writable workspace 外；普通文件/skill/image/read 使用 no-follow descriptor 和设备/inode复核；helper staging、workspace mutation 和最终 rename 仍有路径式 parent TOCTOU。
+当前 transparent Bash 有 scoped foreground adapter：它用 `ctx.shell.resolve()` 取得 cwd、timeout 与 stdout cap，不调用本机 `ctx.shell.execute()`，也不再把桌面端 DSH 文件沙箱策略下推为远端隔离（`resolveBashSpec` 固定 `danger-full-access`）。helper 仅执行 POSIX Bash，以 SSH 登录用户的普通环境与权限在主机上运行，`process.env` 随之继承；工作目录若落在本地 mirror 内会映射回远端路径，否则按远端绝对路径校验。bwrap 相关分支仍保留在 helper 内但 transparent 路径不再使用；项目 skill 目录与 skill 引用文件通过 `project_skill_read{resource:true}` 以只读方式提供，用户级 skill 根为 `$DSH_HOME/skills` 与 `$AGENTS_HOME/skills`；MCP 由服务器自身配置发现并经 `RemoteMcpStdioTransport` 在服务器上启动。per-call escalation、background/promotion、PTY、任务重连/恢复和本机 spill 尚不支持；每个 stdout/stderr 最多收集 256 KiB。取消/timeout 会对目标进程组发 TERM，再按 grace 发 KILL；bwrap 模式额外使用 PID namespace，danger-full-access 下主动 daemonize 的后代仍可能逃逸。项目 root 与 helper cache 均要求在 writable workspace 外；普通文件/skill/image/read 使用 no-follow descriptor 和设备/inode复核；helper staging、workspace mutation 和最终 rename 仍有路径式 parent TOCTOU。
 本地 helper/bridge 单测覆盖 argv、超时、取消和输出限制，但尚未在真实 Linux SSH 主机上验证 bwrap namespace、workspace-write denial 或 DSH 宿主全链路。
 
 
@@ -158,7 +158,7 @@ DSH 0.2.1-rc.3 的 `agent/created` payload 为 `{ agent, source, signal? }`，�
 - remote manifest 不可用或 mirror 中存在远端已不存在的 project skill 时，以不允许调用的 Agent-scope 项屏蔽旧本地副本；skills service 的 incomplete snapshot 不会发布半份清单。
 - 插件声明只在 manifest 标记为 unsupported。已核验的 DSH 0.2.1-rc.3 Loader 从 `$DSH_HOME/profiles/<profile>/package.json` 与 profile `cordis.patch.yml` 装载，不存在项目级隔离入口；不复制远端依赖、`node_modules` 或可执行 patch，也不自动安装。
 
-- transparent 的标准文件工具在 helper RPC 前读取 workspace root 与最多 16 层祖先中的 `AGENTS.md`/`CLAUDE.md`，单文件上限 256 KiB；helper 对每个路径逐级 `lstat`、拒绝 symlink，并通过 `O_NOFOLLOW` descriptor 校验后读取。远端删除只移除仍与已同步版本一致的本地副本；本地冲突、越界和安全校验失败均在远端操作前 fail-closed。
+- transparent 的标准文件工具在 helper RPC 前读取 workspace root 与最多 16 层祖先中的 `AGENTS.md`/`CLAUDE.md`，单文件上限 256 KiB；helper 先 `realpath` 再逐级 `lstat`：工作区内的软链（如 `CLAUDE.md -> AGENTS.md`）照常读取并按目标去重，解析到工作区外的软链只跳过该文件、不中断本轮，并通过 `O_NOFOLLOW` descriptor 校验后读取。远端删除只移除仍与已同步版本一致的本地副本；本地冲突、越界和安全校验失败均在远端操作前 fail-closed。
 - instruction mirror 的三方状态另存 SHA-256；同 size/mtime 但内容不同、本地旧状态缺 hash 或缓存被改动时一律冲突，不覆盖也不删除。读取用 O_NOFOLLOW descriptor 与 inode 校验；写入会复核父目录 identity，但最终 rename 仍有窄 path-based TOCTOU，helper 不是 OS sandbox。
 
 剩余 P4：标准 schema 的项目配置与插件批准需要 DSH host 提供 Agent/project-scoped config overlay 和可信 approval seam。当前 ConfigEditor 只写 profile patch；compatibility exemptions 仅校验 profile 已安装包的精确版本兼容，不是项目执行批准。宿主自己的 user-global context 仍按 DSH 原有规则加载，不代表远端用户配置已同步；在 host seam 到位前，项目插件声明保持诊断-only。

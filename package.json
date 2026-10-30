@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote",
-  "version": "0.8.53",
+  "version": "0.8.54",
   "description": "Remote-work assistant for DeepSeek Harness: SSH and workspace sync, 22 legacy rw_* tools, conflict-aware mirror, one-click dsh deployment, port forwarding, sidebar editing and audit log; opt-in transparent mode routes standard DSH tools to remote mirrors.",
   "license": "MIT",
   "author": "flymysql <flyphp@outlook.com>",
@@ -54,6 +54,7 @@
     "@deepseek-ai/dsh-commands": ">=0.1.0-rc.6 <0.3.0",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.6 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.3.0",
+    "@deepseek-ai/dsh-mcp-client": ">=0.1.0-rc.6 <0.3.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6 <0.3.0",
     "@deepseek-ai/dsh-client-ui-renderer": ">=0.1.2-rc.1 <0.3.0",
     "@deepseek-ai/dsh-client-locale": ">=0.1.2-rc.1 <0.3.0",
@@ -62,6 +63,9 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-mcp-client": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-connection": {

@@ -97,6 +97,77 @@ const CONFIG = {
   localTools: 'bootstrap', executionMode: 'transparent',
 }
 
+test('pre-step refresh warnings never abort a remote session', async (t) => {
+  const { home, mirrorDir } = makeHome()
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const mod = await import(`../lib/index.js?pre-step-warning=${Math.random()}`)
+  for (const loggerMode of ['available', 'missing', 'throwing']) {
+    const fixture = makeCtx(['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash'])
+    const warnings = []
+    fixture.ctx.get = (name) => {
+      if (name !== 'logger' || loggerMode === 'missing') return undefined
+      return { warn(...args) {
+        if (loggerMode === 'throwing') throw new Error('logger unavailable')
+        warnings.push(args)
+      } }
+    }
+    await mod.apply(fixture.ctx, { ...CONFIG })
+    const remote = agentFor(mirrorDir, fixture.tools)
+    await fixture.listeners.get('agent/created')({ agent: remote.agent })
+    let continued = 0
+    const result = await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => {
+      continued++
+      return 'continued'
+    })
+    assert.equal(result, 'continued')
+    assert.equal(continued, 1)
+    if (loggerMode === 'available') {
+      assert.equal(warnings.length, 1)
+      assert.match(warnings[0][0], /remote instruction pre-step refresh failed/)
+      assert.match(warnings[0][1], /requires DSH workingDirectory.ensure/)
+    }
+    await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
+  }
+})
+
+test('pre-step refresh resolves the sandbox policy shared with agent creation', async (t) => {
+  const { home, mirrorDir } = makeHome()
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const { RemoteHelperBroker } = await import('../lib/remote-helper.js')
+  t.mock.method(RemoteHelperBroker.prototype, 'get', async () => ({ root: '/home/lucas/proj' }))
+  const fixture = makeCtx(['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash'])
+  const warnings = []
+  const policyInputs = []
+  fixture.ctx.get = (name) => ({
+    workingDirectory: { ensure: async () => path.join(home, 'outside-mirror') },
+    sandboxPolicy: { resolve: async (input) => { policyInputs.push(input); return { mode: 'danger-full-access' } } },
+    logger: { warn: (...args) => warnings.push(args) },
+  })[name]
+  const mod = await import(`../lib/index.js?pre-step-policy=${Math.random()}`)
+  await mod.apply(fixture.ctx, { ...CONFIG })
+  const remote = agentFor(mirrorDir, fixture.tools)
+  await fixture.listeners.get('agent/created')({ agent: remote.agent })
+  let continued = 0
+  await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => { continued++ })
+  assert.deepEqual(policyInputs, [{ session: remote.agent.session }])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0][1], /requires the negotiated remote helper root/)
+  assert.equal(continued, 1)
+  await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
+})
+
 const assemblyFor = (names) => ({
   sections: [], contexts: [], variables: {},
   tools: names.map((name) => ({ name, description: name, parameters: { type: 'object' } })),

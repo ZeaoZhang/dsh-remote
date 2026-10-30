@@ -2,6 +2,68 @@
 
 All notable changes to **dsh-remote**.
 
+## Unreleased
+### 指令软链不再中断远端一轮（`CLAUDE.md -> AGENTS.md`）
+
+`CLAUDE.md -> AGENTS.md` 是常见的仓库约定，但 transparent 的 pre-step 指令刷新把它当致命错误：
+helper 逐级 `lstat` 命中软链即抛 `REMOTE_CONFIG_SYMLINK`，宿主把它列在 `fatalCodes` 里，整轮在模型
+被调用前就失败（`本轮运行失败instruction symlinks are not followed`）。本地核心加载器与远端静态索引
+扫描都只是跳过软链，只有这条链路 fail-closed。
+
+- **helper**（`lib/remote-helper-child.cjs`）：`resolveInstructionTarget` 先 `realpath` 再逐级
+  `lstat`。解析后仍在工作区内的软链照常读取并返回规范路径；解析到工作区外的软链仍然拒绝
+  （`REMOTE_CONFIG_SYMLINK`）；规范路径上的某一级若在两步之间变成软链，则按并发替换拒绝
+  （`REMOTE_PATH_CHANGED`），不会读到新目标。
+- **宿主**（`lib/instructions-dynamic.js`）：单个候选被拒（`REMOTE_CONFIG_SYMLINK`）只跳过该文件，
+  并把它计入 `present`，整条链继续刷新；两个候选解析到同一个规范路径（`CLAUDE.md` 与
+  `AGENTS.md`）时按目标去重，只注入一次、镜像也只写一份。
+- **宿主**（`lib/index.js`）：`REMOTE_CONFIG_SYMLINK` 移出 `pre-step` 的 `fatalCodes`，改为对该
+  工作区路径告警一次（其余镜像/传输故障仍然致命）。
+- 新增/更新单测：helper 侧跟随工作区内软链、拒绝越界软链与坏死软链；`refreshTouched` 侧跳过被拒
+  候选不产生镜像冲突、别名文件只注入一次。已在 10.74.167.234 上用真实仓库树（git 记录的
+  `120000` 软链）跑过 helper 验证。
+
+## 0.8.54 — 2026-10-29
+### 透明模式真的跑在服务器上：主机 Bash、服务器 Skill、服务器 MCP
+
+透明模式的目标是「让模型以为自己在服务器上」，但此前的实现仍把桌面端 DSH 的文件沙箱策略下推成
+远端 bwrap 隔离，Skill 只来自项目目录，MCP 用的是本机配置。这一版把三条链路都改成以**服务器为准**。
+
+**1. Bash 直接在主机执行**（`lib/remote-bash.js`、`lib/index.js`）
+
+`resolveBashSpec` 不再解析桌面端 `sandboxPolicy`，策略固定为 `danger-full-access`：命令以 SSH 登录
+用户的普通环境与权限执行，`process.env` 完整继承，不再创建 bwrap 环境、不再有只读/工作区写隔离。
+`remoteBashCwd` 重写：本地镜像目录映射回远端路径，其余按远端绝对路径校验，修复了把桌面镜像路径
+当作远端 cwd 的问题。`/execution-mode-status` 随之报告 `confinedBashRequiresLinuxBwrap: false`，
+前置依赖只剩 `ripgrep`。
+
+**2. Skill 直接来自服务器**（`lib/project-config.js`、`lib/remote-helper-child.cjs`）
+
+远端技能根扩展为项目 `.dsh/skills`、`.agents/skills` 与用户级 `$DSH_HOME/skills`、
+`$AGENTS_HOME/skills`（权限序 100/200/300/400）。服务器上以**符号链接**安装的 skill（自带
+`SKILL.md`）现在会被发现，清单上限从 64 提到 256、总预算 8 MiB。`read` 工具在拒绝「工作区之外」
+之前先尝试远端 skill 资源，`~/.dsh/skills/x/SKILL.md` 一类路径由服务器直接返回；同名的本地技能
+一律墓碑化（`modelInvocable:false`、`userInvocable:false`）。远端清单完整但本地视图不完整时，
+服务器技能照常全部提供，同时继续保留本地墓碑（`remoteComplete` / `hostComplete` 分开上报）。
+
+**3. MCP 直接来自服务器**（新增 `lib/remote-mcp.js`、`lib/remote-mcp-config.js`）
+
+按 `$DSH_HOME/mcp.json`、`<ws>/.mcp.json`、`<ws>/.dsh/mcp.json` 顺序合并，经 SSH 通道在服务器上
+启动 stdio server；`${workspaceFolder}`/`${cwd}` 展开为远端工作区。工具以 `mcp__server__tool`
+注册在每个 Agent 的作用域内，继承自本机的 MCP 工具全部遮蔽；远端 MCP 初始化失败时也按
+fail-closed 处理，绝不回退到本地 MCP。
+
+**边界（已知限制）**：
+
+- 远端 MCP 仅支持 stdio；HTTP/SSE 明确报错。不支持 `${env:NAME}` 插值、`envFile`、自动重连、
+  配置热更新与 `tools/list_changed` 同步（需重建 Agent）。
+- 配置发现与 server 启动要求服务器 PATH 上有 `node`（或显式 `nodeCommand`）；非空配置还需能解析
+  `@deepseek-ai/dsh-mcp-client`（已加为可选 peer dependency）。
+- 主机模式下主动 daemonize 的后代进程不受管；`run_in_background`、超时升级、PTY 仍不支持。
+- `~/.agents/skills` 中不携带 `SKILL.md` 的条目仍作为诊断上报（`REMOTE_CONFIG_SYMLINK`）。
+- `maskRemoteMcpCapabilities` 依赖 `tools.view/restrict/get/guard`；缺失这些 API 的旧运行时无法
+  保证 MCP 只来自服务器。
+
 ## 0.8.53 — 2026-10-27
 ### 远程子目录的 AGENTS.md 会自动进上下文了（issue #71）
 

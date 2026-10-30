@@ -42,7 +42,7 @@ test('remote shell env does not forward unapproved secrets or local PATH overrid
 function startHelper(root, env = {}) {
   const child = spawn(process.execPath, [helper, '--root', root], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...env },
+    env: { ...process.env, HOME: path.join(root, '.test-user-home'), DSH_HOME: '', AGENTS_HOME: '', ...env },
   })
   const waiting = new Map()
   const diagnostics = []
@@ -229,7 +229,7 @@ test('descriptor-bound reads reject a parent replaced with an outside symlink', 
 })
 
 
-test('instruction reads return bounded full text and reject symlink components', async (t) => {
+test('instruction reads return bounded full text and follow in-workspace symlinks', async (t) => {
   const parent = mkdtempSync(path.join(tmpdir(), 'dsh-remote-instructions-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const root = path.join(parent, 'workspace')
@@ -237,9 +237,14 @@ test('instruction reads return bounded full text and reject symlink components',
   mkdirSync(path.join(root, 'docs'), { recursive: true })
   mkdirSync(outside)
   writeFileSync(path.join(root, 'docs', 'AGENTS.md'), '# remote rules\n')
+  writeFileSync(path.join(root, 'AGENTS.md'), '# root rules\n')
   writeFileSync(path.join(root, 'large.md'), 'x'.repeat(300 * 1024))
   writeFileSync(path.join(outside, 'AGENTS.md'), '# outside\n')
   symlinkSync(path.join(root, 'docs', 'AGENTS.md'), path.join(root, 'linked.md'))
+  // The convention that used to abort whole sessions: the local rules alias.
+  symlinkSync(path.join(root, 'AGENTS.md'), path.join(root, 'CLAUDE.md'))
+  symlinkSync(path.join(parent, 'outside', 'AGENTS.md'), path.join(root, 'escaped.md'))
+  symlinkSync(path.join(root, 'missing-target.md'), path.join(root, 'broken.md'))
   symlinkSync(outside, path.join(root, 'linked-dir'))
 
   const instance = startHelper(root)
@@ -254,8 +259,18 @@ test('instruction reads return bounded full text and reject symlink components',
   const large = await instance.request('instruction_read', { path: 'large.md' })
   assert.equal(large.oversizeBytes, 300 * 1024)
   assert.equal(large.content, undefined)
-  await assert.rejects(instance.request('instruction_read', { path: 'linked.md' }), (error) => error.code === 'REMOTE_CONFIG_SYMLINK')
+
+  const linked = await instance.request('instruction_read', { path: 'linked.md' })
+  assert.equal(linked.content, '# remote rules\n', 'a link inside the workspace still delivers its rules')
+  assert.match(linked.path, /docs[\\/]AGENTS\.md$/, 'and reports the resolved canonical path')
+
+  const alias = await instance.request('instruction_read', { path: 'CLAUDE.md' })
+  assert.equal(alias.content, '# root rules\n')
+  assert.match(alias.path, /[\\/]AGENTS\.md$/)
+
+  await assert.rejects(instance.request('instruction_read', { path: 'escaped.md' }), (error) => error.code === 'REMOTE_CONFIG_SYMLINK')
   await assert.rejects(instance.request('instruction_read', { path: 'linked-dir/AGENTS.md' }), (error) => error.code === 'REMOTE_CONFIG_SYMLINK')
+  await assert.rejects(instance.request('instruction_read', { path: 'broken.md' }), (error) => error.code === 'REMOTE_NOT_FOUND')
   await assert.rejects(instance.request('instruction_read', { path: 'missing/AGENTS.md' }), (error) => error.code === 'REMOTE_NOT_FOUND')
   await instance.shutdown()
 })
@@ -543,7 +558,14 @@ test('project skill manifest is bounded, scoped, credential-aware, and version-c
   const outside = path.join(parent, 'outside')
   mkdirSync(outside)
   writeFileSync(path.join(outside, 'SKILL.md'), 'outside')
+  // A symlinked skill entry that is a skill IN ITS OWN RIGHT (own SKILL.md) is
+  // discovered: host machines install skills exactly this way. A link onto a
+  // bare directory is still skipped and reported.
   symlinkSync(outside, path.join(dshSkills, 'linked'))
+  const bare = path.join(parent, 'bare')
+  mkdirSync(bare)
+  writeFileSync(path.join(bare, 'notes.txt'), 'not a skill')
+  symlinkSync(bare, path.join(dshSkills, 'barelinked'))
 
   const instance = startHelper(root)
   t.after(() => { if (instance.child.exitCode === null) instance.child.kill() })
@@ -568,6 +590,57 @@ test('project skill manifest is bounded, scoped, credential-aware, and version-c
   await instance.shutdown()
 })
 
+
+test('server user skills use remote homes and permit only bounded read-only skill resources', async (t) => {
+  const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'dsh-user-skills-')))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const root = path.join(parent, 'workspace')
+  const home = path.join(parent, 'home')
+  const dshHome = path.join(home, 'custom-dsh')
+  const agentsHome = path.join(home, 'custom-agents')
+  mkdirSync(root)
+  const review = path.join(dshHome, 'skills', 'review')
+  mkdirSync(path.join(review, 'references'), { recursive: true })
+  mkdirSync(path.join(agentsHome, 'skills'), { recursive: true })
+  writeFileSync(path.join(review, 'SKILL.md'), '---\nname: review\ndescription: Server review\n---\nRead references/guide.txt.\n')
+  writeFileSync(path.join(review, 'references', 'guide.txt'), 'server resource\n')
+  writeFileSync(path.join(review, 'references', 'large.txt'), 'x'.repeat(128 * 1024 + 1))
+  writeFileSync(path.join(review, 'references', 'binary.txt'), Buffer.from([0xff, 0xfe]))
+  writeFileSync(path.join(review, '.env'), 'secret')
+  writeFileSync(path.join(agentsHome, 'skills', 'flat.md'), '---\nname: flat\ndescription: Server agents skill\n---\nServer text.\n')
+  writeFileSync(path.join(dshHome, 'credentials.json'), 'host secret')
+  symlinkSync(path.join(dshHome, 'credentials.json'), path.join(review, 'linked.txt'))
+  const instance = startHelper(root, { HOME: home, DSH_HOME: dshHome, AGENTS_HOME: agentsHome })
+  t.after(() => { if (instance.child.exitCode === null) instance.child.kill() })
+  const manifest = await instance.request('project_skills_manifest')
+  assert.equal(manifest.complete, true)
+  assert.deepEqual(manifest.entries.map((item) => [item.source, item.rank]).sort(), [['user-agents', 400], ['user-dsh', 300]])
+  const skill = manifest.entries.find((item) => item.source === 'user-dsh')
+  assert.equal(skill.path, path.join(review, 'SKILL.md'))
+  assert.match((await instance.request('project_skill_read', { path: skill.path, expectedVersion: skill.version })).text, /Server review/)
+  const resource = await instance.request('project_skill_read', { path: path.join(review, 'references', 'guide.txt'), resource: true })
+  assert.equal(resource.text, 'server resource\n')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(review, 'references', 'guide.txt') }), (error) => error.code === 'REMOTE_CONFIG_PATH_DENIED')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(review, '.env'), resource: true }), (error) => error.code === 'REMOTE_CONFIG_PATH_DENIED')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(review, 'linked.txt'), resource: true }), (error) => error.code === 'REMOTE_CONFIG_SYMLINK')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(dshHome, 'credentials.json'), resource: true }), (error) => error.code === 'REMOTE_PATH_DENIED')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(review, 'references', 'large.txt'), resource: true }), (error) => error.code === 'REMOTE_CONTENT_TOO_LARGE')
+  await assert.rejects(instance.request('project_skill_read', { path: path.join(review, 'references', 'binary.txt'), resource: true }), (error) => error.code === 'REMOTE_CONFIG_NOT_UTF8')
+  await assert.rejects(instance.request('read', { path: skill.path }), (error) => error.code === 'REMOTE_PATH_DENIED')
+  await assert.rejects(instance.request('write', { path: skill.path, content: 'overwrite' }), (error) => error.code === 'REMOTE_PATH_DENIED')
+  await instance.shutdown()
+
+  const defaultSkill = path.join(home, '.dsh', 'skills', 'default.md')
+  const defaultAgentsSkill = path.join(home, '.agents', 'skills', 'default-agents.md')
+  mkdirSync(path.dirname(defaultSkill), { recursive: true })
+  mkdirSync(path.dirname(defaultAgentsSkill), { recursive: true })
+  writeFileSync(defaultSkill, '---\nname: default\ndescription: Default user skill\n---\nDefault.\n')
+  writeFileSync(defaultAgentsSkill, '---\nname: default-agents\ndescription: Default agents skill\n---\nDefault.\n')
+  const defaults = startHelper(root, { HOME: home, DSH_HOME: '', AGENTS_HOME: '' })
+  t.after(() => { if (defaults.child.exitCode === null) defaults.child.kill() })
+  assert.deepEqual((await defaults.request('project_skills_manifest')).entries.map((item) => item.path).sort(), [defaultAgentsSkill, defaultSkill].sort())
+  await defaults.shutdown()
+})
 
 test('remote helper rejects traversal, symlink escape, and protocol mismatch', async (t) => {
   const parent = mkdtempSync(path.join(tmpdir(), 'dsh-remote-helper-'))
