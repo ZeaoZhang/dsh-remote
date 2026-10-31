@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadMachines, saveMachines, sanitizeMachine, applyMachine, machineId } from '../lib/registry.js'
+import { loadMachines, saveMachines, sanitizeMachine, applyMachine, machineId, hasStoredPassword, resolveProbeCredentials } from '../lib/registry.js'
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), 'dsh-remote-reg-'))
 const file = (dir) => path.join(dir, 'machines.json')
@@ -96,6 +96,72 @@ test('sanitizeMachine strips passwords but reports passwordSet', () => {
   assert.equal(s.proxy.password, '')
   assert.equal(s.proxy.passwordSet, true)
   assert.equal(s.host, 'h1')
+})
+
+// A keychain machine stores `password: ''` by design, so `!!m.password` reported
+// passwordSet:false and the settings page looked like the plugin had lost the
+// credential it was holding.
+test('hasStoredPassword counts keychain secrets, not only plaintext', () => {
+  assert.equal(hasStoredPassword({ password: 'pw' }), true)
+  assert.equal(hasStoredPassword({ password: '', secretStored: true }), true)
+  assert.equal(hasStoredPassword({ password: '', secretStored: false, credentialBackend: 'keychain' }), false)
+  // Records written before `secretStored` existed: the backend is the evidence.
+  assert.equal(hasStoredPassword({ password: '', credentialBackend: 'keychain' }), true)
+  assert.equal(hasStoredPassword({ password: '', credentialBackend: 'plain' }), false)
+  assert.equal(hasStoredPassword(null), false)
+})
+
+test('sanitizeMachine never round-trips the private-key passphrase', () => {
+  const s = sanitizeMachine({ id: 'a', host: 'h1', password: '', secretStored: true, passphrase: 'secret-phrase' })
+  assert.equal(s.passphrase, undefined, 'the passphrase must not reach the browser')
+  assert.equal(s.passphraseSet, true)
+  assert.equal(s.passwordSet, true)
+  assert.equal(sanitizeMachine({ id: 'b', host: 'h2', passphrase: '' }).passphraseSet, false)
+})
+
+test('resolveProbeCredentials lets the form override and falls back to the saved record', () => {
+  const saved = {
+    password: '',
+    passphrase: 'key-pass',
+    privateKeyPath: '/keys/id_ed25519',
+    useAgent: true,
+    keyboardInteractive: true,
+    backend: 'openssh',
+    proxy: { host: 'jump', port: 2222, username: 'ops', password: 'jump-pw', privateKeyPath: '/keys/jump' },
+  }
+  // An edit-then-test form: everything blank except the host it is about to dial.
+  const merged = resolveProbeCredentials({ host: 'h1', password: '', passphrase: '' }, saved, 'from-keychain')
+  assert.equal(merged.password, 'from-keychain', 'the keychain secret is used when the form is blank')
+  assert.equal(merged.usedSavedCredential, true)
+  assert.equal(merged.passphrase, 'key-pass')
+  assert.equal(merged.privateKeyPath, '/keys/id_ed25519')
+  assert.equal(merged.useAgent, true)
+  assert.equal(merged.keyboardInteractive, true)
+  assert.equal(merged.backend, 'openssh')
+  assert.equal(merged.proxy.password, 'jump-pw', 'the bastion password is carried over')
+  assert.equal(merged.proxy.port, 2222)
+
+  // A form value always wins; booleans are only taken when actually supplied.
+  const overridden = resolveProbeCredentials(
+    { password: 'typed', passphrase: 'new-pass', useAgent: false, proxy: { host: 'jump2', password: '' } },
+    saved,
+    'from-keychain',
+  )
+  assert.equal(overridden.password, 'typed')
+  assert.equal(overridden.usedSavedCredential, false)
+  assert.equal(overridden.passphrase, 'new-pass')
+  assert.equal(overridden.useAgent, false)
+  assert.equal(overridden.proxy.host, 'jump2')
+  assert.equal(overridden.proxy.password, 'jump-pw', 'a blank form bastion password keeps the saved one')
+})
+
+test('resolveProbeCredentials with no saved record behaves like a plain form probe', () => {
+  const cred = resolveProbeCredentials({ host: 'h', password: 'pw', useAgent: 'yes' }, null, '')
+  assert.equal(cred.password, 'pw')
+  assert.equal(cred.usedSavedCredential, false)
+  assert.equal(cred.useAgent, false, 'a non-boolean form value must not enable agent auth')
+  assert.equal(cred.backend, 'native')
+  assert.equal(cred.proxy, undefined)
 })
 
 test('applyMachine overrides the live config fields', () => {

@@ -247,6 +247,34 @@ test('a missing remote read emits an absent observation', async (t) => {
   assert.deepEqual(fixture.observations, [[fixture.targets[0], { kind: 'absent' }, fixture.exec]])
 })
 
+// The remote helper never reports ENOENT: a missing path arrives as its own
+// protocol code REMOTE_NOT_FOUND. Only matching ENOENT left the observation
+// stale, so an edit afterwards could believe the file still existed with the
+// last-read version.
+test('a missing remote read reported as REMOTE_NOT_FOUND also emits an absent observation', async (t) => {
+  const fixture = createFixture(t, {
+    request: async () => {
+      const error = new Error('cannot resolve remote path: no such file or directory')
+      error.code = 'REMOTE_NOT_FOUND'
+      throw error
+    },
+  })
+  await assert.rejects(fixture.scopedTools.get('read').execute({ file_path: 'missing.txt' }, fixture.exec), /no such file/)
+  assert.deepEqual(fixture.observations, [[fixture.targets[0], { kind: 'absent' }, fixture.exec]])
+})
+
+test('a missing read_image reported as REMOTE_NOT_FOUND also emits an absent observation', async (t) => {
+  const fixture = createFixture(t, {
+    readImage: async () => {
+      const error = new Error('cannot resolve remote path: no such file or directory')
+      error.code = 'REMOTE_NOT_FOUND'
+      throw error
+    },
+  })
+  await assert.rejects(fixture.scopedTools.get('read_image').execute({ file_path: 'missing.png' }, fixture.exec), /no such file/)
+  assert.deepEqual(fixture.observations, [[fixture.targets[0], { kind: 'absent' }, fixture.exec]])
+})
+
 test('read_image uses its remote bridge and emits a canonical observation', async (t) => {
   const canonicalPath = '/srv/project/src/diagram.png'
   let received

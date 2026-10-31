@@ -26,6 +26,26 @@ test('credentials + sftp categories', () => {
   assert.equal(classifyError(new Error('sftp operation timed out')).category, 'sftp')
 })
 
+test('a missing SSH agent is reported as an agent problem, not as missing credentials', () => {
+  const c = classifyError(new Error('no SSH agent available: useAgent is enabled for this machine but SSH_AUTH_SOCK is not set'))
+  assert.equal(c.category, 'credentials')
+  assert.match(c.hint, /SSH agent/)
+  assert.match(c.hint, /SSH_AUTH_SOCK/)
+})
+
+test('a handshake that dies mid-way is classified as network, not as "other"', () => {
+  const c = classifyError(new Error('Timed out while waiting for handshake'))
+  assert.equal(c.category, 'network')
+  assert.match(c.hint, /握手/)
+  assert.equal(classifyError(new Error('Connection lost before handshake')).category, 'network')
+  assert.equal(classifyError(new Error('no matching key exchange method found')).category, 'network')
+})
+
+test('an unclassified failure still names the machine it happened on', () => {
+  const m = friendlyMessage(new Error('weird custom error'), { host: '10.0.0.5', port: 2222 })
+  assert.equal(m, 'weird custom error (10.0.0.5:2222)')
+})
+
 test('friendlyMessage keeps the raw message for unknown errors', () => {
   assert.equal(friendlyMessage(new Error('weird custom error')), 'weird custom error')
   const m = friendlyMessage(new Error('Permission denied (publickey).'))
