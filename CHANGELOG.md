@@ -3,6 +3,46 @@
 All notable changes to **dsh-remote**.
 
 ## Unreleased
+### 透明模式按需导入仅存在于本机的文件（聊天附件 / 截图）
+
+透明模式的标准工具跑在 SSH 主机上，而聊天对话框里的附件、`browser_screenshot` 保存的截图只有本机路径：
+模型拿到的 `~/.dsh/attachments/v1/objects/...` 或 `~/.dsh/browser-control/screenshots/...`
+在远端不存在，`read`/`read_image` 一律报 `absolute path is outside the remote mirror and workspace`。
+只放开"读本机文件"没有意义——紧接着的 `bash`/`edit`/`glob`/`grep` 仍在远端，读到内容也无从继续。
+
+- **导入**（新增 `lib/local-import.js`）：首次被标准 `read`/`read_image` 引用时，把文件按 sha256
+  复制到 `<ws>/.dsh-remote/imports/<sha256>/<basename>`（SFTP 临时文件 + `renameOverwrite` 原子落位，
+  远端已有同大小副本则跳过传输），随后这次调用直接读远端副本。账本
+  `<mirrorDir>/.dsh-remote-imports.json` 记录 `localPath → { remotePath, sha256, size, mtimeNs }`，
+  重复读取只做一次本地 `stat`，内容变化自动落到新的摘要目录。
+- 允许的根目录：`$DSH_HOME/attachments`、`$DSH_HOME/browser-control`，可用 `config.localImportRoots`
+  扩展；只接受绝对路径的普通文件，`realpath` 后仍须在根目录内（符号链接不能逃逸），且不超过
+  `config.maxImportBytes`（默认 50 MiB）。`config.localImport=false` 完全关闭。
+- **工具层**（`lib/transparent-tools.js`）：仅在正常解析失败且工具为 `read`/`read_image` 时尝试导入，
+  工作区内路径从不触发；`write`/`edit` 对仅本机存在的文件返回"先 read 导入"的明确提示，而不是静默
+  改本地文件；导入失败保留具体原因（不在允许目录、文件不存在、超过上限）。同一文件的并发导入单飞。
+- 镜像同步忽略 `.dsh-remote/` 与 `.dsh-remote-imports.json`（新增 `DEFAULT_SYNC_IGNORE`），
+  但 `glob`/`grep` 仍能看到导入的文件；`@` mention 与 GUI 文件预览本就走远端树，无需额外改动。
+- 透明模式系统提示补充：附件/截图在首次 `read` 时导入，后续 `bash`/`edit` 使用返回的 `path`。
+- 新增单测 `test/local-import.test.js`（10 例：校验与拒绝原因、原子上传、账本复用、内容变化、
+  已存在副本、并发单飞、根目录外拒绝、开关、默认根目录）与 `test/transparent-tools.test.js`
+  5 例（read/read_image 导入、失败透传、write/edit 提示、工作区路径不触发导入、导入被拒绝时不读本地）。
+
+### 透明模式的 write/edit 不再被默认文件策略的 intent 拒绝
+
+DSH 默认预设（`@deepseek-ai/dsh-base`）无条件挂载 `fs-observation-policy`（文件编辑保护），
+其 `fs/write-intent`/`fs/edit-intent` 监听器对任何目标都返回非空 intent（未读为
+`createIfAbsent`、读过为 `replaceIfVersion` 或 `{ version }`），只有完全没有策略监听时才落回
+`undefined`。透明模式的改写路径却把"非空 intent"一律视为无法履行并抛出
+`transparent remote edit cannot honor a non-empty local filesystem intent`，因此在默认 DSH
+上透明模式的每一次 write/edit 都失败；升级 DSH 后才暴露（策略插件进入默认 bundle 之前 intent 恒为空）。
+
+- **工具层**（`lib/transparent-tools.js`）：新增 `mutationIntentVersion()`，把已知 intent
+  翻译为远端条件而不是拒绝——`createIfAbsent` ⇒ `expectedVersion: null`（helper 只允许创建），
+  `replaceIfVersion` ⇒ 沿用远端观测账本里的版本 CAS，edit 的 `{ version }` 同样沿用该 CAS
+  （edit 本已强制"先读远端"）。intent 与远端观测账本矛盾时（会话恢复后本地观测丢失、或远端
+  版本因 stale 被丢弃）仍 fail-closed 并提示重读；未知形态继续按原样拒绝。
+- 新增单测：三种真实 intent 形态分别映射到 create-only / 版本 CAS，矛盾形态与未知形态仍拒绝。
 ### 恢复的透明会话自动补装工具覆盖，不再静默回落到本地执行
 
 透明模式只在 `agent/created` 时安装标准工具覆盖。从磁盘恢复的会话、以及插件重载前创建的会话
@@ -40,7 +80,7 @@ helper 逐级 `lstat` 命中软链即抛 `REMOTE_CONFIG_SYMLINK`，宿主把它�
 - **宿主**（`lib/index.js`）：`REMOTE_CONFIG_SYMLINK` 移出 `pre-step` 的 `fatalCodes`，改为对该
   工作区路径告警一次（其余镜像/传输故障仍然致命）。
 - 新增/更新单测：helper 侧跟随工作区内软链、拒绝越界软链与坏死软链；`refreshTouched` 侧跳过被拒
-  候选不产生镜像冲突、别名文件只注入一次。已在 10.74.167.234 上用真实仓库树（git 记录的
+  候选不产生镜像冲突、别名文件只注入一次。已在一台内网测试机上用真实仓库树（git 记录的
   `120000` 软链）跑过 helper 验证。
 
 ## 0.8.54 — 2026-10-29

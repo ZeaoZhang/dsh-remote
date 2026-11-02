@@ -132,6 +132,7 @@ function createFixture(t, options = {}) {
       order.push(`before:${context.name}`)
     }),
     isSearchToolWrapped: options.isSearchToolWrapped,
+    localImport: options.localImport,
     assertMutationAllowed: options.assertMutationAllowed || (async (...args) => { guardCalls.push(args) }),
   })
 
@@ -417,7 +418,7 @@ test('write awaits post-mutation mirror refresh before returning to DSH', async 
   await fixture.scopedTools.get('write').execute({ file_path: 'new-rules.txt', content: 'rules' }, fixture.exec)
   assert.equal(refreshed, true)
 })
-test('non-empty DSH mutation intents fail closed before remote writes', async (t) => {
+test('unknown DSH mutation intents fail closed before remote writes', async (t) => {
   const fixture = createFixture(t, { intent: { kind: 'unrecognized-policy' } })
   const edit = fixture.scopedTools.get('edit').execute
   const filePath = path.join(fixture.mirrorDir, 'src', 'file.txt')
@@ -427,6 +428,56 @@ test('non-empty DSH mutation intents fail closed before remote writes', async (t
 
   assert.deepEqual(fixture.requests.map(({ op }) => op), ['read'])
   assert.deepEqual(fixture.intents.map(([name]) => name), ['fs/edit-intent'])
+})
+
+test('createIfAbsent intent keeps the remote write create-only', async (t) => {
+  const fixture = createFixture(t, { intent: { kind: 'createIfAbsent' } })
+
+  await fixture.scopedTools.get('write').execute({ file_path: 'new-rules.txt', content: 'rules' }, fixture.exec)
+
+  assert.deepEqual(fixture.intents.map(([name]) => name), ['fs/write-intent'])
+  assert.deepEqual(fixture.requests.map(({ op, payload }) => ({ op, payload })), [
+    { op: 'write', payload: { path: '/srv/project/src/new-rules.txt', content: 'rules', expectedVersion: null, expectedPath: null } },
+  ])
+})
+
+test('createIfAbsent intent refuses to overwrite a remote version this session already observed', async (t) => {
+  const fixture = createFixture(t, { intent: { kind: 'createIfAbsent' } })
+
+  await fixture.scopedTools.get('read').execute({ file_path: 'file.txt' }, fixture.exec)
+  await assert.rejects(
+    fixture.scopedTools.get('write').execute({ file_path: 'file.txt', content: 'new' }, fixture.exec),
+    /create-only local intent/,
+  )
+  assert.deepEqual(fixture.requests.map(({ op }) => op), ['read'])
+})
+
+test('replaceIfVersion intent keeps the remote version read from the file', async (t) => {
+  const fixture = createFixture(t, { intent: { kind: 'replaceIfVersion', version: 'd'.repeat(64) } })
+
+  await fixture.scopedTools.get('read').execute({ file_path: 'file.txt' }, fixture.exec)
+  await fixture.scopedTools.get('write').execute({ file_path: 'file.txt', content: 'new' }, fixture.exec)
+
+  assert.equal(fixture.requests.at(-1).payload.expectedVersion, READ_VERSION)
+})
+
+test('version-guarded intents refuse a remote write with no observed version', async (t) => {
+  const fixture = createFixture(t, { intent: { kind: 'replaceIfVersion', version: 'd'.repeat(64) } })
+
+  await assert.rejects(
+    fixture.scopedTools.get('write').execute({ file_path: 'file.txt', content: 'new' }, fixture.exec),
+    /version-guarded local intent/,
+  )
+  assert.deepEqual(fixture.requests, [])
+})
+
+test('edit intent version keeps the remote version read from the file', async (t) => {
+  const fixture = createFixture(t, { intent: { version: 'd'.repeat(64) } })
+
+  await fixture.scopedTools.get('read').execute({ file_path: 'file.txt' }, fixture.exec)
+  await fixture.scopedTools.get('edit').execute({ file_path: 'file.txt', old_string: 'old', new_string: 'new' }, fixture.exec)
+
+  assert.equal(fixture.requests.at(-1).payload.expectedVersion, READ_VERSION)
 })
 
 test('write and edit reject sandbox escalation arguments and denied mutations', async (t) => {
@@ -630,4 +681,116 @@ test('write is not replayed when the remote channel drops', async (t) => {
   assert.equal(attempts, 1)
   assert.equal(fixture.localCalls.write, 0)
   fixture.dispose()
+})
+
+test('read imports a local-only attachment before acting on the remote copy', async (t) => {
+  const importedPath = `/srv/project/.dsh-remote/imports/${'e'.repeat(64)}/spec.md`
+  const imported = []
+  const fixture = createFixture(t, {
+    localImport: {
+      isImportable: async () => { throw new Error('isImportable must not be consulted for reads') },
+      importFile: async (request) => {
+        imported.push(request)
+        return { remotePath: importedPath, sha256: 'e'.repeat(64), size: 11 }
+      },
+    },
+  })
+  const localPath = '/Users/someone/.dsh/attachments/v1/objects/ab/abcdef'
+
+  const result = await fixture.scopedTools.get('read').execute({ file_path: localPath }, fixture.exec)
+
+  assert.equal(imported.length, 1)
+  assert.equal(imported[0].localPath, localPath)
+  assert.equal(imported[0].binding.ws, '/srv/project')
+  assert.equal(result.path, importedPath)
+  assert.deepEqual(fixture.requests.map(({ op, payload }) => [op, payload.path]), [['read', importedPath]])
+  assert.deepEqual(fixture.observations.map(([, observation]) => observation), [
+    { kind: 'present', version: READ_VERSION },
+  ])
+})
+
+test('read_image imports a local-only screenshot before reading the remote copy', async (t) => {
+  const importedPath = `/srv/project/.dsh-remote/imports/${'f'.repeat(64)}/shot.png`
+  let received
+  const fixture = createFixture(t, {
+    localImport: {
+      importFile: async () => ({ remotePath: importedPath, sha256: 'f'.repeat(64), size: 32 }),
+    },
+    readImage: async (input) => {
+      received = input
+      return {
+        path: input.remotePath,
+        version: READ_VERSION,
+        image: { attachmentId: 'att-2', mediaType: 'image/png', bytes: 32, width: 4, height: 4 },
+      }
+    },
+  })
+  const localPath = '/Users/someone/.dsh/browser-control/screenshots/browser-1-tab2.png'
+
+  const result = await fixture.scopedTools.get('read_image').execute({ file_path: localPath }, fixture.exec)
+
+  assert.equal(received.remotePath, importedPath)
+  assert.equal(result.path, importedPath)
+  assert.equal(result.image.attachmentId, 'att-2')
+})
+
+test('a rejected local import surfaces its reason and never reads locally', async (t) => {
+  const fixture = createFixture(t, {
+    localImport: {
+      importFile: async (request) => {
+        const error = new Error(`local file ${request.localPath} cannot be imported onto the remote host: it is outside the local import roots (/home/u/.dsh/attachments)`)
+        error.code = 'LOCAL_IMPORT_REJECTED'
+        throw error
+      },
+    },
+  })
+
+  await assert.rejects(
+    fixture.scopedTools.get('read').execute({ file_path: '/etc/passwd' }, fixture.exec),
+    /cannot be imported onto the remote host: it is outside the local import roots/,
+  )
+  assert.equal(fixture.requests.length, 0)
+  assert.equal(fixture.localCalls.read, 0)
+})
+
+test('write and edit point at the import instead of touching a local-only file', async (t) => {
+  const localPath = '/Users/someone/.dsh/attachments/v1/objects/cd/cdefgh'
+  const fixture = createFixture(t, {
+    localImport: {
+      isImportable: async (candidate) => candidate === localPath,
+      importFile: async () => { throw new Error('writes must never import') },
+    },
+  })
+
+  await assert.rejects(
+    fixture.scopedTools.get('write').execute({ file_path: localPath, content: 'x' }, fixture.exec),
+    /cannot change a file that only exists on the local machine .*read it first/s,
+  )
+  await assert.rejects(
+    fixture.scopedTools.get('edit').execute({ file_path: localPath, old_string: 'a', new_string: 'b' }, fixture.exec),
+    /only exists on the local machine/,
+  )
+  assert.equal(fixture.requests.length, 0)
+
+  const notImportable = createFixture(t, { localImport: { isImportable: async () => false } })
+  await assert.rejects(
+    notImportable.scopedTools.get('write').execute({ file_path: '/etc/hosts', content: 'x' }, notImportable.exec),
+    /absolute path is outside the remote mirror and workspace/,
+  )
+})
+
+test('workspace paths never consult the local importer', async (t) => {
+  let consulted = 0
+  const fixture = createFixture(t, {
+    localImport: {
+      isImportable: async () => { consulted += 1; return true },
+      importFile: async () => { consulted += 1; return { remotePath: '/srv/project/x' } },
+    },
+  })
+
+  await fixture.scopedTools.get('read').execute({ file_path: '/srv/project/docs/guide.md' }, fixture.exec)
+  await fixture.scopedTools.get('write').execute({ file_path: '/srv/project/docs/guide.md', content: 'x' }, fixture.exec)
+
+  assert.equal(consulted, 0)
+  assert.equal(fixture.requests[0].payload.path, '/srv/project/docs/guide.md')
 })
