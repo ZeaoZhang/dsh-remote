@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { executionModeStatus, skillResourceResult } from '../lib/index.js'
+import { executionModeStatus, normalizeTransparentLocalMirror, skillResourceResult } from '../lib/index.js'
 
 test('tool-mode status is allowlisted, read-only and legacy by default', () => {
   const status = executionModeStatus({ host: 'secret.example', password: 'not returned' })
@@ -11,6 +11,7 @@ test('tool-mode status is allowlisted, read-only and legacy by default', () => {
     rwTools: 'registered',
     remoteTools: [],
     projectSkills: 'disabled',
+    transparentLocalMirror: 'n/a',
     projectConfig: 'profile-scoped-only',
     projectConfigReason: 'DSH 0.2.1-rc.3 ConfigEditor writes/reconciles profile patches; no project/Agent config overlay provider is available.',
     projectPlugins: 'unsupported',
@@ -33,6 +34,8 @@ test('transparent mode status lists only enabled routes and known limitations', 
   assert.equal(status.mode, 'transparent')
   assert.deepEqual(status.remoteTools, ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash'])
   assert.equal(status.projectSkills, 'agent-scoped')
+  assert.equal(status.transparentLocalMirror, 'merge')
+  assert.equal(executionModeStatus({ executionMode: 'transparent', transparentLocalMirror: 'remote-only' }).transparentLocalMirror, 'remote-only')
   assert.equal(status.projectConfig, 'profile-scoped-only')
   assert.equal(status.projectPlugins, 'unsupported')
   assert.equal(status.searchRequiresRemoteRg, true)
@@ -42,6 +45,15 @@ test('transparent mode status lists only enabled routes and known limitations', 
   assert.deepEqual(status.remoteMcp, { transport: 'stdio', dependency: '@deepseek-ai/dsh-mcp-client' })
   assert.equal(status.backgroundJobs, false)
   assert.equal(status.taskRecovery, false)
+})
+
+test('transparent local-mirror mode normalizes to merge unless explicitly remote-only', () => {
+  assert.equal(normalizeTransparentLocalMirror(undefined), 'merge')
+  assert.equal(normalizeTransparentLocalMirror('merge'), 'merge')
+  assert.equal(normalizeTransparentLocalMirror('anything-else'), 'merge')
+  for (const value of ['remote-only', 'remote', 'off', 'false', '0', ' OFF ']) {
+    assert.equal(normalizeTransparentLocalMirror(value), 'remote-only', value)
+  }
 })
 
 test('skill resources are sliced into the standard read shape', () => {

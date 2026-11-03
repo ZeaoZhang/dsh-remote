@@ -3,6 +3,30 @@
 All notable changes to **dsh-remote**.
 
 ## Unreleased
+### 透明模式合并本地镜像中的 skills 与 AGENTS.md（`transparentLocalMirror`，默认开启）
+
+透明模式此前"以服务器为准"：本机 filesystem/用户/项目 skill 全部被 scope 内屏蔽，mirror 里独有的 skill 无法加载；
+本地镜像里的 `AGENTS.md`/`CLAUDE.md` 若远端没有，还会让刷新报 `transparent instruction mirror conflict`
+并让后续文件操作 fail-closed。而镜像目录 `~/.dsh/remote-workspaces/` 恰恰是用户放本地补充内容（本地 skill、
+只在本地生效的指令）的地方。新增配置 `transparentLocalMirror`（默认 `merge`，`remote-only` 恢复 0.8.54 行为）：
+
+- **skills**（`lib/project-config.js`）：`hostSuppressionCandidates` 在 merge 模式跳过镜像目录内的候选，
+  这些技能改由 core 的 filesystem provider 加载（snapshot cwd 就是镜像目录），因此正文解析只有一条路径；
+  远端同名技能仍由 Agent-scope 的远端 provider 优先，用户级本机 skill（`~/.dsh/skills`、`~/.agents/skills`）
+  继续屏蔽。镜像独有技能的引用文件由 `readResource` 从本机镜像只读返回：只接受镜像目录内、且属于
+  "远端没有同名技能" 的目录，`realpath` + `lstat` 普通文件校验，128 KiB 上限；远端路径形式也会映射回镜像。
+- **指令文件**（`lib/instructions.js`、`lib/instructions-dynamic.js`）：`syncInstructionsToMirror` 增加
+  `mergeLocal`。远端没有的未跟踪本地指令保留（`keptLocal`），根/祖先链上的由 core 从镜像注入；远端拥有的同路径未跟踪
+  副本由远端内容覆盖（`superseded`，每个镜像+路径告警一次，因为远端仍是该路径的权威）；rw_sync 已记录且
+  size/mtime 未变的副本按"未修改"接受远端更新；已跟踪但本地改过的仍是冲突并 fail-closed（不会静默丢用户的
+  本地修改）。`transparentLocalMirror=remote-only` 时行为与 0.8.54 完全一致。
+- **配置/状态**：`Config.transparentLocalMirror`（字符串，schemastery 3.18 无 enum，代码里归一化：
+  `remote-only`/`remote`/`off`/`false`/`0` → 纯远端，其余 → merge）；`executionModeStatus` 增加
+  `transparentLocalMirror` 只读字段；透明模式系统提示说明镜像补充与"远端优先"的去重规则。
+- 新增单测 `test/transparent-local-mirror.test.js`（7 例：本地独有指令保留、同路径未跟踪副本被远端覆盖、
+  已跟踪本地修改仍冲突、rw_sync 未修改副本接受更新、merge 模式镜像 skill 不被屏蔽而用户级仍屏蔽、
+  镜像资源本地读取/远端路径映射/远端资源仍走 RPC、remote-only 不读本地副本）。
+
 ### 透明模式按需导入仅存在于本机的文件（聊天附件 / 截图）
 
 透明模式的标准工具跑在 SSH 主机上，而聊天对话框里的附件、`browser_screenshot` 保存的截图只有本机路径：
