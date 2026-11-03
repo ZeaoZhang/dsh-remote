@@ -160,8 +160,9 @@ DSH 0.2.1-rc.3 的 `agent/created` payload 为 `{ agent, source, signal? }`，�
 
 - transparent 的标准文件工具在 helper RPC 前读取 workspace root 与最多 16 层祖先中的 `AGENTS.md`/`CLAUDE.md`，单文件上限 256 KiB；helper 先 `realpath` 再逐级 `lstat`：工作区内的软链（如 `CLAUDE.md -> AGENTS.md`）照常读取并按目标去重，解析到工作区外的软链只跳过该文件、不中断本轮，并通过 `O_NOFOLLOW` descriptor 校验后读取。远端删除只移除仍与已同步版本一致的本地副本；本地冲突、越界和安全校验失败均在远端操作前 fail-closed。
 - instruction mirror 的三方状态另存 SHA-256；同 size/mtime 但内容不同、本地旧状态缺 hash 或缓存被改动时一律冲突，不覆盖也不删除。读取用 O_NOFOLLOW descriptor 与 inode 校验；写入会复核父目录 identity，但最终 rename 仍有窄 path-based TOCTOU，helper 不是 OS sandbox。
+- 本地镜像合并（`transparentLocalMirror`，默认 `merge`）：镜像 `~/.dsh/remote-workspaces/` 里独有的 skill 不再被 scope 内屏蔽，由 core 的 filesystem provider（snapshot cwd = 镜像目录）加载正文；远端 provider 仍然提供同名远端技能并优先，用户级本机 skill 继续屏蔽。镜像独有技能的引用文件由项目 provider 的 `readResource` 从本机镜像只读返回（realpath 包含性 + `lstat` 普通文件 + 128 KiB 上限），远端路径形式也映射回镜像。指令文件方面，远端没有的未跟踪本地指令保留并交给 core 注入；远端拥有的同路径未跟踪副本由远端内容覆盖（`superseded`，每次镜像+路径告警一次）；rw_sync 已记录且 size/mtime 未变的副本按“未修改”接受远端更新；已跟踪但被本地改过的仍是冲突并 fail-closed。`remote-only` 恢复 0.8.54 的纯远端行为。
 
-剩余 P4：标准 schema 的项目配置与插件批准需要 DSH host 提供 Agent/project-scoped config overlay 和可信 approval seam。当前 ConfigEditor 只写 profile patch；compatibility exemptions 仅校验 profile 已安装包的精确版本兼容，不是项目执行批准。宿主自己的 user-global context 仍按 DSH 原有规则加载，不代表远端用户配置已同步；在 host seam 到位前，项目插件声明保持诊断-only。
+剩余 P4：标准 schema 的项目配置与插件批准需要 DSH host 提供 Agent/project-scoped config overlay 和可信 approval seam。当前 ConfigEditor 只写 profile patch；compatibility exemptions 仅校验 profile 已安装包的精确版本兼容，不是项目执行批准。宿主自己的 user-global context 仍按 DSH 原有规则加载（merge 只覆盖远端 mirror 目录内的项目级 skill/指令），不代表远端用户配置已同步；在 host seam 到位前，项目插件声明保持诊断-only。
 
 验收：首次打开可在 Agent scope 发现远端项目技能；内容和资源路径始终指向远端；远端更新后生成新版本快照；失败保留最后一份完整元数据但不回退到本地正文；不复制凭据；插件请求仅显示诊断、绝不执行；其他项目和本机用户配置不被改写。
 
