@@ -30,7 +30,16 @@ function makeTool(name, localCalls) {
           justification: { type: 'string' },
         },
       }
-      : { type: 'object', properties: { file_path: { type: 'string' } } },
+      : {
+        type: 'object',
+        required: ['file_path'],
+        properties: {
+          file_path: { type: 'string' },
+          ...(name === 'write' || name === 'edit'
+            ? { sandbox_permissions: { type: 'string' }, justification: { type: 'string' } }
+            : {}),
+        },
+      },
     output: {
       schema: name === 'bash'
         ? { type: 'object', additionalProperties: true }
@@ -148,8 +157,18 @@ test('registers same-name scoped overrides while preserving standard tool metada
     const scoped = fixture.scopedTools.get(name)
     assert.equal(scoped.name, name)
     assert.notEqual(scoped.execute, original.execute)
-    for (const field of ['description', 'parameters', 'output', 'presentCall', 'presentResult', 'localMarker']) {
+    for (const field of ['output', 'presentCall', 'presentResult', 'localMarker']) {
       assert.strictEqual(scoped[field], original[field], `${name}.${field} should be preserved by reference`)
+    }
+    // write/edit re-declare parameters so the local approval surface is no
+    // longer advertised; every other tool passes the schema through. (bash
+    // re-declares them too whenever the fixture wires a remote executor.)
+    if (name === 'write' || name === 'edit') {
+      assert.notEqual(scoped.parameters, original.parameters, `${name}.parameters must be re-declared`)
+      assert.match(scoped.description, /per-call sandbox escalation is unavailable/)
+    } else {
+      assert.strictEqual(scoped.description, original.description)
+      assert.strictEqual(scoped.parameters, original.parameters, `${name}.parameters should be preserved by reference`)
     }
     if (name === 'read_image') assert.equal(scoped.isConcurrencySafe(), false)
     else assert.strictEqual(scoped.isConcurrencySafe, original.isConcurrencySafe)
@@ -494,6 +513,15 @@ test('write and edit reject sandbox escalation arguments and denied mutations', 
   const validArgs = { file_path: 'notes.txt', content: 'new' }
   const validEditArgs = { file_path: 'notes.txt', old_string: 'old', new_string: 'new' }
 
+  // The declared schema must not offer what the override refuses: a model that
+  // sees sandbox_permissions fills it in, and the rejection then fails a call
+  // whose only problem was the declaration.
+  for (const name of ['write', 'edit']) {
+    const declared = fixture.scopedTools.get(name).parameters
+    assert.equal(declared.properties.sandbox_permissions, undefined)
+    assert.equal(declared.properties.justification, undefined)
+    assert.equal(Object.hasOwn(declared.properties, 'file_path'), true)
+  }
   await assert.rejects(write({ ...validArgs, sandbox_permissions: 'danger-full-access' }, fixture.exec), /does not accept sandbox_permissions or justification/)
   await assert.rejects(write({ ...validArgs, justification: 'needed' }, fixture.exec), /does not accept sandbox_permissions or justification/)
   await assert.rejects(edit({ ...validEditArgs, sandbox_permissions: 'danger-full-access' }, fixture.exec), /does not accept sandbox_permissions or justification/)

@@ -128,9 +128,11 @@ test('pre-step refresh warnings never abort a remote session', async (t) => {
     assert.equal(result, 'continued')
     assert.equal(continued, 1)
     if (loggerMode === 'available') {
-      assert.equal(warnings.length, 1)
-      assert.match(warnings[0][0], /remote instruction pre-step refresh failed/)
-      assert.match(warnings[0][1], /requires DSH workingDirectory.ensure/)
+      // A fixture with no subprocess service also reports the degraded search
+      // bridge; only the instruction-refresh diagnostic belongs here.
+      const refreshWarnings = warnings.filter((args) => /remote instruction pre-step refresh failed/.test(String(args[0])))
+      assert.equal(refreshWarnings.length, 1)
+      assert.match(refreshWarnings[0][1], /requires DSH workingDirectory.ensure/)
     }
     await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
   }
@@ -162,8 +164,10 @@ test('pre-step refresh resolves the sandbox policy shared with agent creation', 
   let continued = 0
   await fixture.listeners.get('agent/pre-step')({ agent: remote.agent }, async () => { continued++ })
   assert.deepEqual(policyInputs, [{ session: remote.agent.session }])
-  assert.equal(warnings.length, 1)
-  assert.match(warnings[0][1], /requires the negotiated remote helper root/)
+  // A fixture without a subprocess service also degrades the search bridge;
+  // that diagnostic is separate from the instruction-refresh warning.
+  const refreshWarnings = warnings.filter((args) => /requires the negotiated remote helper root/.test(String(args[1])))
+  assert.equal(refreshWarnings.length, 1)
   assert.equal(continued, 1)
   await fixture.listeners.get('agent/disposed')({ agent: remote.agent })
 })

@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { installTransparentSearchBridge } from '../lib/transparent-search.js'
+import { installTransparentSearchBridge, transparentSearchBridgeBlocker } from '../lib/transparent-search.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -324,4 +324,30 @@ test('wraps preset-scoped search definitions the global view cannot see', async 
   assert.equal(app.tools.get('glob', agent), visibleGlob)
   assert.notEqual(visibleGlob.execute, originalGlobExecute)
   assert.equal(localCalls.length, 0)
+})
+
+// A null bridge silently turns glob/grep into fail-closed stubs; the caller
+// must be able to say WHY, so the degradation is diagnosable from the log.
+test('reports why the transparent search bridge cannot be installed', () => {
+  const complete = {
+    tools: { get() {} },
+    subprocess: { spawn() {} },
+    resolveBinding() {},
+    resolveBindingForCwd() {},
+    async getHelper() {},
+  }
+  assert.equal(transparentSearchBridgeBlocker(complete), null)
+  assert.equal(installTransparentSearchBridge(complete) === null, false)
+
+  const cases = [
+    [{ tools: undefined }, /tools registry/],
+    [{ subprocess: undefined }, /subprocess service/],
+    [{ resolveBinding: undefined }, /workspace binding/],
+    [{ getHelper: undefined }, /helper broker/],
+  ]
+  for (const [patch, pattern] of cases) {
+    const dependencies = { ...complete, ...patch }
+    assert.match(transparentSearchBridgeBlocker(dependencies), pattern)
+    assert.equal(installTransparentSearchBridge(dependencies), null)
+  }
 })
