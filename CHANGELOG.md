@@ -3,6 +3,25 @@
 All notable changes to **dsh-remote**.
 
 ## Unreleased
+### 透明模式：修复 `edit` 误拒参数与 `grep`/`glob` 降级为桩且无提示
+
+两个独立的适配层缺陷，都只在透明模式下出现：
+
+- **`write`/`edit` 声明了 `sandbox_permissions`/`justification` 却拒绝接收**（`lib/transparent-tools.js`）：
+  透明模式给 `write`/`edit` 套远端执行时原样保留了 DSH 的 schema，模型照着声明传参，随后
+  `rejectSandboxEscalation` 抛 `transparent remote edit does not accept sandbox_permissions or justification`。
+  现在与 `bash` 一致：新增 `withoutLocalApprovalParameters`，`foregroundBashTool` 与新的
+  `remoteMutationTool` 共用它从声明的参数里摘掉本地审批面（`run_in_background`/`sandbox_permissions`/
+  `justification`），并在描述里说明远端不提供按次沙箱升级。拒绝逻辑保留作为兜底（直接传参仍会失败）。
+- **搜索桥接管失败时静默装桩**：`glob`/`grep` 只有在桥包装了「该 agent 实际解析到的定义」时才保留原生工具，
+  否则被替换为 fail-closed 桩；此前桥为 `null` 或包装失败都不留痕迹。现在
+  `lib/transparent-search.js` 导出 `transparentSearchBridgeBlocker({ tools, subprocess, resolveBinding,
+  resolveBindingForCwd, getHelper })` 给出具体原因，`lib/index.js` 在桥缺失时 warn 一次，并在
+  `isSearchToolWrapped` 返回 false 时按 agent warn 一次（附「可见 glob/grep + scope」诊断），
+  失败依旧 fail-closed（绝不把搜索漏到本机执行）。
+- 测试：`test/transparent-tools.test.js` 断言 `write`/`edit` 不再声明审批参数且仍拒绝直传；
+  `test/transparent-search.test.js` 新增 `reports why the transparent search bridge cannot be installed`。
+
 ### 透明模式合并本地镜像中的 skills 与 AGENTS.md（`transparentLocalMirror`，默认开启）
 
 透明模式此前"以服务器为准"：本机 filesystem/用户/项目 skill 全部被 scope 内屏蔽，mirror 里独有的 skill 无法加载；
