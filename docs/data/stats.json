@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-11-15T06:36:07.540Z",
+  "generatedAt": "2026-11-15T18:53:05.633Z",
   "heartbeat": null,
   "heartbeatError": "DSH_HB_STATS_KEY not set; skipping heartbeat stats (npm/repo data still refreshed)",
   "npm": {
     "package": "dsh-remote",
-    "checkedAt": "2026-11-15T06:36:07.231Z",
-    "latest": "1.1.2",
+    "checkedAt": "2026-11-15T18:53:05.198Z",
+    "latest": "1.2.0",
     "lastWeek": 79516,
     "lastMonth": 157507,
     "daily": [
@@ -137,9 +137,9 @@
     "note": "npm daily counts have reporting gaps; zero-value days are flagged and are not real zero usage."
   },
   "repo": {
-    "stars": 289,
+    "stars": 290,
     "forks": 50,
-    "openIssues": 2,
-    "pushedAt": "2026-11-15T06:25:41Z"
+    "openIssues": 1,
+    "pushedAt": "2026-11-15T18:49:23Z"
   }
 }
