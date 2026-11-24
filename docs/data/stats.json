@@ -1,18 +1,14 @@
 {
-  "generatedAt": "2026-11-24T09:56:37.490Z",
+  "generatedAt": "2026-11-24T22:29:17.022Z",
   "heartbeat": null,
   "heartbeatError": "DSH_HB_STATS_KEY not set; skipping heartbeat stats (npm/repo data still refreshed)",
   "npm": {
     "package": "dsh-remote",
-    "checkedAt": "2026-11-24T09:56:37.136Z",
+    "checkedAt": "2026-11-24T22:29:16.657Z",
     "latest": "1.4.1",
-    "lastWeek": 101250,
-    "lastMonth": 254134,
+    "lastWeek": 114511,
+    "lastMonth": 279808,
     "daily": [
-      {
-        "day": "2026-10-24",
-        "downloads": 1231
-      },
       {
         "day": "2026-10-25",
         "downloads": 810
@@ -128,15 +124,19 @@
       {
         "day": "2026-11-22",
         "downloads": 17739
+      },
+      {
+        "day": "2026-11-23",
+        "downloads": 26905
       }
     ],
     "zeroDays": [],
     "note": "npm daily counts have reporting gaps; zero-value days are flagged and are not real zero usage."
   },
   "repo": {
-    "stars": 350,
+    "stars": 352,
     "forks": 65,
-    "openIssues": 1,
-    "pushedAt": "2026-11-24T09:51:14Z"
+    "openIssues": 3,
+    "pushedAt": "2026-11-24T22:24:06Z"
   }
 }
